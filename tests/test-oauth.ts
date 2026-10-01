@@ -134,3 +134,41 @@ describe("organization login", () => {
     assert.deepEqual(output.content, [{ type: "text", text: "OK" }])
   })
 })
+
+describe("refresh with several accounts", () => {
+  it("renews each credential with its own OIDC registration, not the last login's", async (t) => {
+    const tokenRequests: Record<string, unknown>[] = []
+    t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      if (url.endsWith("/client/register")) return response({ clientId: "client-b", clientSecret: "secret-b" })
+      if (url.endsWith("/device_authorization")) return response({
+        deviceCode: "d", userCode: "C", verificationUri: "https://example.com/v",
+        verificationUriComplete: "https://example.com/v?c=C", interval: 0, expiresIn: 600,
+      })
+      if (body.grantType === "refresh_token") {
+        tokenRequests.push(body)
+        return response({ accessToken: `renewed-${String(body.clientId)}`, refreshToken: "rotated", expiresIn: 3600 })
+      }
+      return response({ accessToken: "access-b", refreshToken: "refresh-b", expiresIn: 3600 })
+    })
+    // Account A signed in earlier, with its own registration.
+    const accountA = {
+      access: "access-a", refresh: "refresh-a", expires: 0,
+      method: "idc", region: "us-east-1", clientId: "client-a", clientSecret: "secret-a",
+    }
+    // Account B signs in afterwards and overwrites the shared sidecar.
+    const answers = ["4"]
+    const accountB = await login({ onPrompt: async () => answers.shift() ?? "", onAuth: () => {} })
+    if (typeof accountB === "string") throw new Error("Expected OAuth credentials")
+
+    const renewedA = await refreshToken(accountA)
+    const renewedB = await refreshToken(accountB)
+
+    assert.equal(renewedA.access, "renewed-client-a")
+    assert.equal(renewedB.access, "renewed-client-b")
+    assert.deepEqual(tokenRequests.map((request) => request.clientId), ["client-a", "client-b"])
+    // The renewed credential keeps describing its own registration.
+    assert.equal(renewedA.clientId, "client-a")
+  })
+})

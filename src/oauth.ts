@@ -58,6 +58,34 @@ interface OMPCredentials {
   access: string
   refresh: string
   expires: number
+  method?: string
+  region?: string
+  clientId?: string
+  clientSecret?: string
+  profileArn?: string
+}
+
+/** OMP stores whatever the provider returns, so the refresh method travels with each credential. */
+function embedMeta(creds: OMPCredentials, meta: KiroAuthMeta): OMPCredentials {
+  return {
+    ...creds,
+    method: meta.method,
+    ...(meta.region ? { region: meta.region } : {}),
+    ...(meta.clientId ? { clientId: meta.clientId } : {}),
+    ...(meta.clientSecret ? { clientSecret: meta.clientSecret } : {}),
+    ...(meta.profileArn ? { profileArn: meta.profileArn } : {}),
+  }
+}
+
+function metaOf(creds: OMPCredentials): KiroAuthMeta | undefined {
+  if (!creds.method) return undefined
+  return {
+    method: creds.method,
+    region: creds.region,
+    clientId: creds.clientId,
+    clientSecret: creds.clientSecret,
+    profileArn: creds.profileArn,
+  }
 }
 
 function credentialsFromApiKey(apiKey: string): OMPCredentials {
@@ -278,15 +306,16 @@ function toFull(creds: OMPCredentials, meta: KiroAuthMeta): FullCredentials {
 }
 
 function fromFull(full: FullCredentials): { creds: OMPCredentials; meta: KiroAuthMeta } {
+  const meta: KiroAuthMeta = {
+    method: full.method,
+    clientId: full.clientId,
+    clientSecret: full.clientSecret,
+    region: full.region,
+    profileArn: full.profileArn,
+  }
   return {
-    creds: { access: full.access, refresh: full.refresh, expires: full.expiresAt },
-    meta: {
-      method: full.method,
-      clientId: full.clientId,
-      clientSecret: full.clientSecret,
-      region: full.region,
-      profileArn: full.profileArn,
-    },
+    creds: embedMeta({ access: full.access, refresh: full.refresh, expires: full.expiresAt }, meta),
+    meta,
   }
 }
 
@@ -355,7 +384,7 @@ export async function login(callbacks: import("./types.ts").OAuthLoginCallbacks)
         writeMeta(result.meta)
         return result.creds
       }
-      return detected.creds
+      return embedMeta(detected.creds, detected.meta)
     }
 
     case "2": {
@@ -374,7 +403,7 @@ export async function login(callbacks: import("./types.ts").OAuthLoginCallbacks)
       const region = regionRaw.trim() || DEFAULT_REGION
 
       writeMeta({ method: "social", region })
-      return { access: "", refresh: refreshToken, expires: 0 }
+      return embedMeta({ access: "", refresh: refreshToken, expires: 0 }, { method: "social", region })
     }
 
     case "4": {
@@ -419,20 +448,25 @@ export async function login(callbacks: import("./types.ts").OAuthLoginCallbacks)
 // ---------------------------------------------------------------------------
 
 export async function refreshToken(credentials: OMPCredentials): Promise<OMPCredentials> {
+  // Credentials saved by this version carry their own refresh method. The shared sidecar only
+  // describes the most recent login, so it is a fallback for credentials saved before that.
+  const own = metaOf(credentials)
+
   // For IDC auth, try to re-read from kiro-cli first (it manages its own refresh)
-  const cliCreds = tryReadCliCredentials()
-  if (cliCreds && cliCreds.creds.expires > Date.now()) {
-    writeMeta(cliCreds.meta)
-    return cliCreds.creds
+  if (!own) {
+    const cliCreds = tryReadCliCredentials()
+    if (cliCreds && cliCreds.creds.expires > Date.now()) {
+      writeMeta(cliCreds.meta)
+      return embedMeta(cliCreds.creds, cliCreds.meta)
+    }
   }
 
-  // Fall back to stored metadata + manual refresh
-  const meta = readMeta()
+  const meta = own ?? readMeta()
   if (!meta) throw new Error("No Kiro auth metadata found. Run /login first.")
 
   const refreshed = await refreshKiroToken(toFull(credentials, meta))
   const result = fromFull(refreshed)
-  writeMeta(result.meta)
+  if (!own) writeMeta(result.meta)
   return result.creds
 }
 
