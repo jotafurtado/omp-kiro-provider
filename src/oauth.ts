@@ -464,12 +464,13 @@ export async function refreshToken(credentials: OMPCredentials): Promise<OMPCred
   const own = metaOf(credentials)
 
   // Kiro CLI and IDE refresh (and rotate) the same token themselves, so credentials reused from
-  // them defer to the live CLI state first, as do credentials saved before metadata was embedded.
+  // either defer to the live state first. Credentials saved before metadata was embedded keep the
+  // original behavior, which only consulted the CLI.
   if (!own || credentials.reused) {
-    const cliCreds = tryReadCliCredentials()
-    if (cliCreds && cliCreds.creds.expires > Date.now()) {
-      writeMeta(cliCreds.meta)
-      return { ...embedMeta(cliCreds.creds, cliCreds.meta), reused: true }
+    const live = credentials.reused ? tryAutoDetect() : tryReadCliCredentials()
+    if (live && live.creds.expires > Date.now()) {
+      writeMeta(live.meta)
+      return { ...embedMeta(live.creds, live.meta), reused: true }
     }
   }
 

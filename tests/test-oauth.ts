@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { execFileSync, spawnSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, describe, it } from "node:test"
@@ -242,6 +242,30 @@ describe("credentials reused from Kiro CLI", () => {
     }
     const reused = await refreshToken({ ...stored, reused: true })
     assert.equal(reused.access, "cli-access")
+    assert.equal(reused.reused, true)
+    assert.equal((await refreshToken(stored)).access, "renewed")
+  })
+})
+
+describe("credentials reused from Kiro IDE", () => {
+  const ssoDir = join(home, ".aws", "sso", "cache")
+
+  it("defer to the live IDE token on refresh when no CLI is installed", async (t) => {
+    mkdirSync(ssoDir, { recursive: true })
+    t.after(() => rmSync(ssoDir, { recursive: true, force: true }))
+    writeFileSync(join(ssoDir, "kiro-auth-token.json"), JSON.stringify({
+      accessToken: "ide-access", refreshToken: "ide-refresh",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(), region: "us-east-1",
+    }))
+    t.mock.method(globalThis, "fetch", async () =>
+      response({ accessToken: "renewed", refreshToken: "rotated", expiresIn: 3600 }))
+
+    const stored = {
+      access: "stale", refresh: "stale", expires: 0,
+      method: "social", region: "us-east-1",
+    }
+    const reused = await refreshToken({ ...stored, reused: true })
+    assert.equal(reused.access, "ide-access")
     assert.equal(reused.reused, true)
     assert.equal((await refreshToken(stored)).access, "renewed")
   })
