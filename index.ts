@@ -58,8 +58,9 @@ const streamKiro = createStreamKiro({
 export default function (pi: ExtensionAPI) {
   pi.registerProvider("kiro", {
     baseUrl: API_BASE,
-    // OMP resolves apiKey as an env var name and keeps the literal when unset,
-    // which outranks the OAuth credential. Declare it only when actually set.
+    // With KIRO_API_KEY unset, OMP's model discovery received this literal name as the key
+    // instead of the OAuth token (observed on OMP 18.4.9) and cached an empty catalog.
+    // Declare it only when the variable is actually set.
     ...(process.env.KIRO_API_KEY ? { apiKey: "KIRO_API_KEY" } : {}),
     authHeader: true,
     api: "kiro-custom" as never,

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, rmSync } from "node:fs"
+import { execFileSync, spawnSync } from "node:child_process"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, describe, it } from "node:test"
@@ -215,5 +216,82 @@ describe("profile ARN after a social refresh", () => {
 
     assert.equal(renewed.profileArn, newArn)
     assert.equal(getStoredProfileArn(), newArn)
+  })
+})
+
+describe("credentials reused from Kiro CLI", () => {
+  const cliDir = join(home, ".local", "share", "kiro-cli")
+  const hasSqlite = spawnSync("sqlite3", ["--version"]).status === 0
+
+  it("defer to the live CLI token on refresh, unlike credentials from a direct login", { skip: !hasSqlite }, async (t) => {
+    mkdirSync(cliDir, { recursive: true })
+    t.after(() => rmSync(cliDir, { recursive: true, force: true }))
+    const token = JSON.stringify({
+      access_token: "cli-access", refresh_token: "cli-refresh",
+      expires_at: new Date(Date.now() + 3_600_000).toISOString(), region: "us-east-1",
+    })
+    execFileSync("sqlite3", [join(cliDir, "data.sqlite3"),
+      `CREATE TABLE auth_kv (key TEXT, value TEXT); CREATE TABLE state (key TEXT, value TEXT);`
+      + ` INSERT INTO auth_kv VALUES ('kirocli:odic:token', '${token}');`])
+    t.mock.method(globalThis, "fetch", async () =>
+      response({ accessToken: "renewed", refreshToken: "rotated", expiresIn: 3600 }))
+
+    const stored = {
+      access: "stale", refresh: "stale", expires: 0,
+      method: "idc", region: "us-east-1", clientId: "client", clientSecret: "secret",
+    }
+    const reused = await refreshToken({ ...stored, reused: true })
+    assert.equal(reused.access, "cli-access")
+    assert.equal(reused.reused, true)
+    assert.equal((await refreshToken(stored)).access, "renewed")
+  })
+})
+
+describe("API key login", () => {
+  it("returns a credential that carries its own refresh method", async () => {
+    const answers = ["2", "ksk_example"]
+    const credentials = await login({ onPrompt: async () => answers.shift() ?? "", onAuth: () => {} })
+    if (typeof credentials === "string") throw new Error("Expected OAuth credentials")
+    assert.equal(credentials.method, "apikey")
+    assert.equal((await refreshToken(credentials)).access, "ksk_example")
+  })
+})
+
+describe("cancelling while the profile is resolved", () => {
+  it("reports an abort instead of a missing profile", async () => {
+    const controller = new AbortController()
+    let finish: (message: AssistantMessageLike) => void = () => { throw new Error("Result not initialized") }
+    const result = new Promise<AssistantMessageLike>((resolve) => { finish = resolve })
+    const events: AssistantMessageEvent[] = []
+    const streamKiro = createStreamKiro({
+      apiBase: "https://runtime.us-east-1.kiro.dev",
+      fetchImpl: (async () => {
+        controller.abort()
+        return response({ profiles: [] })
+      }) as typeof fetch,
+      createStream: () => ({
+        push(event) {
+          events.push(event)
+          if (event.type === "done") finish(event.message)
+          if (event.type === "error") finish(event.error)
+        },
+        end(message) { if (message) finish(message) },
+        result: () => result,
+        async *[Symbol.asyncIterator]() { yield* events },
+      }),
+      cwd: () => home,
+      now: () => Date.now(),
+      uuid: () => "test-conversation",
+      env: { OMP_KIRO_STREAM_GATE: "0" },
+      authPaths: [],
+      homeDir: home,
+      calculateCost: () => {},
+    })
+    const output = await streamKiro({
+      id: "claude-opus-5-5", name: "Claude Opus 5.5", api: "kiro-custom", provider: "kiro",
+      reasoning: false, input: ["text"], contextWindow: 1_000_000, maxTokens: 128_000,
+    }, { messages: [{ role: "user", content: "Reply OK" }] }, { apiKey: "organization-token", signal: controller.signal }).result()
+    assert.equal(output.stopReason, "aborted", output.errorMessage)
+    assert.doesNotMatch(output.errorMessage ?? "", /No accessible Kiro profile/)
   })
 })

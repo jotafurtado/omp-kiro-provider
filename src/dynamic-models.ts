@@ -157,7 +157,7 @@ export async function resolveKiroProfileArn(
     options.signal,
   )
   // Builder ID tokens are not allowed to list profiles; they all share one public profile.
-  if (!isApiKey && status === 403 && message?.includes("not authorized to access this feature")) {
+  if (!isApiKey && status === 403 && message?.toLowerCase().includes("not authorized to access this feature")) {
     return BUILDER_ID_PROFILE_ARN
   }
   if (!isRecord(profile)) return undefined

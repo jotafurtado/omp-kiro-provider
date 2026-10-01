@@ -594,6 +594,7 @@ export function createStreamKiro(deps: CoreDependencies) {
             const reason = resolveError instanceof Error ? resolveError.message : String(resolveError)
             throw new Error(`Kiro profile lookup failed (${managementBase}): ${reason}`)
           }
+          if (options?.signal?.aborted) throw abortError()
           if (!profileArn) throw new Error("No accessible Kiro profile found for this account.")
           profileArnCache.set(apiKey, profileArn)
         }

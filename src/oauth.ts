@@ -71,6 +71,8 @@ interface OMPCredentials {
   clientId?: string
   clientSecret?: string
   profileArn?: string
+  /** Taken from Kiro CLI or IDE, which keep refreshing the same token lineage. */
+  reused?: boolean
 }
 
 /** OMP stores whatever the provider returns, so the refresh method travels with each credential. */
@@ -99,7 +101,7 @@ function metaOf(creds: OMPCredentials): KiroAuthMeta | undefined {
 
 function credentialsFromApiKey(apiKey: string): OMPCredentials {
   writeMeta({ method: "apikey" })
-  return { access: apiKey, refresh: apiKey, expires: Date.now() + FAR_FUTURE_MS, accountId: KIRO_ACCOUNT_ID }
+  return embedMeta({ access: apiKey, refresh: apiKey, expires: Date.now() + FAR_FUTURE_MS }, { method: "apikey" })
 }
 
 /** Remove terminal paste wrappers, surrounding whitespace, control chars. */
@@ -391,9 +393,9 @@ export async function login(callbacks: import("./types.ts").OAuthLoginCallbacks)
         const refreshed = await refreshKiroToken(toFull(detected.creds, detected.meta))
         const result = fromFull(refreshed)
         writeMeta(result.meta)
-        return result.creds
+        return { ...result.creds, reused: true }
       }
-      return embedMeta(detected.creds, detected.meta)
+      return { ...embedMeta(detected.creds, detected.meta), reused: true }
     }
 
     case "2": {
@@ -461,12 +463,13 @@ export async function refreshToken(credentials: OMPCredentials): Promise<OMPCred
   // describes the most recent login, so it is a fallback for credentials saved before that.
   const own = metaOf(credentials)
 
-  // For IDC auth, try to re-read from kiro-cli first (it manages its own refresh)
-  if (!own) {
+  // Kiro CLI and IDE refresh (and rotate) the same token themselves, so credentials reused from
+  // them defer to the live CLI state first, as do credentials saved before metadata was embedded.
+  if (!own || credentials.reused) {
     const cliCreds = tryReadCliCredentials()
     if (cliCreds && cliCreds.creds.expires > Date.now()) {
       writeMeta(cliCreds.meta)
-      return embedMeta(cliCreds.creds, cliCreds.meta)
+      return { ...embedMeta(cliCreds.creds, cliCreds.meta), reused: true }
     }
   }
 
@@ -477,7 +480,7 @@ export async function refreshToken(credentials: OMPCredentials): Promise<OMPCred
   const result = fromFull(refreshed)
   // getStoredProfileArn() reads the sidecar, so a renewed profile ARN must reach it too.
   writeMeta(result.meta)
-  return result.creds
+  return credentials.reused ? { ...result.creds, reused: true } : result.creds
 }
 
 // ---------------------------------------------------------------------------
