@@ -56,11 +56,18 @@ describe("Kiro usage provider", () => {
     assert.equal(monthly.window?.resetsAt, 1_800_000_000_000)
     assert.equal(bonus.status, "exhausted")
     assert.equal(bonus.window?.resetLabel, "expires")
-    // The plan keeps accounts on different plans in separate rows of OMP's usage dashboard,
-    // and the Kiro user id lets OMP count and de-duplicate accounts.
+    // The plan labels the limit, and without a credential id the Kiro user id identifies the account.
     assert.equal(monthly.scope.tier, "KIRO PRO")
     assert.equal(monthly.scope.accountId, "user-1")
     assert.equal(report?.metadata?.accountId, "user-1")
+
+    // OMP pairs a report with its credential by account id, so the credential's id takes precedence.
+    const paired = await provider.fetchUsage({
+      provider: "kiro",
+      credential: { type: "oauth", accessToken: "oauth-token", accountId: "kiro" },
+    })
+    assert.equal(paired?.metadata?.accountId, "kiro")
+    assert.equal(paired?.limits[0].scope.accountId, "kiro")
   })
 
   it("uses the saved profile without listing profiles", async () => {

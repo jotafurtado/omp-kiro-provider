@@ -18,6 +18,7 @@ export interface UsageCredential {
   type: "api_key" | "oauth"
   apiKey?: string
   accessToken?: string
+  accountId?: string
 }
 
 export interface UsageFetchParams {
@@ -138,14 +139,15 @@ function buildLimit(args: {
   }
 }
 
-export function toUsageReport(raw: UsageLimitsResponse, fetchedAt: number): UsageReport {
+export function toUsageReport(raw: UsageLimitsResponse, fetchedAt: number, credentialAccountId?: string): UsageReport {
   const buckets = raw.usageBreakdownList?.length
     ? raw.usageBreakdownList
     : raw.usageBreakdown ? [raw.usageBreakdown] : []
   const plan = raw.subscriptionInfo?.subscriptionTitle
-  const accountId = typeof raw.userInfo?.userId === "string" && raw.userInfo.userId.trim() !== ""
-    ? raw.userInfo.userId.trim()
-    : undefined
+  // OMP pairs a report with its credential by account id, so the credential's id wins over Kiro's user id.
+  const accountId = credentialAccountId?.trim()
+    || (typeof raw.userInfo?.userId === "string" ? raw.userInfo.userId.trim() : "")
+    || undefined
   const limits = buckets.flatMap((bucket, index) => {
     const id = bucket.resourceType || `usage-${index}`
     const unit = bucket.resourceType === "CREDIT" ? "credits" : "unknown"
@@ -225,7 +227,7 @@ export function createKiroUsageProvider(options: KiroUsageOptions) {
       })
       // Throw so OMP logs the failure and keeps serving the last good report.
       if (!response.ok) throw new Error(`Kiro usage request failed (${response.status})`)
-      return toUsageReport(await response.json() as UsageLimitsResponse, now())
+      return toUsageReport(await response.json() as UsageLimitsResponse, now(), credential.accountId)
     },
   }
 }
