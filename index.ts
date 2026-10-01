@@ -8,6 +8,7 @@
  * - Social OAuth token reuse (Google/GitHub)
  * - AWS Builder ID device code flow (browser login)
  * - Automatic token refresh (social + OIDC)
+ * - Credit usage reporting for `/usage` and `omp usage`
  *
  * Inference requests use the Kiro CLI's headers.
  * No external dependencies — pure TypeScript, Node builtins only.
@@ -20,6 +21,7 @@ import { fetchDynamicKiroModels } from "./src/dynamic-models.ts"
 import { loadModels } from "./src/models.ts"
 import { getApiKey, getStoredProfileArn, login, refreshToken } from "./src/oauth.ts"
 import { calculateCost, createAssistantMessageEventStream } from "./src/runtime.ts"
+import { createKiroUsageProvider } from "./src/usage.ts"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -74,5 +76,9 @@ export default function (pi: ExtensionAPI) {
       overlay: MODELS,
       profileArn: getStoredProfileArn(),
     }),
+    usage: createKiroUsageProvider({
+      managementBase: MANAGEMENT_BASE,
+      getProfileArn: getStoredProfileArn,
+    }) as never,
   })
 }
