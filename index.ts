@@ -56,7 +56,9 @@ const streamKiro = createStreamKiro({
 export default function (pi: ExtensionAPI) {
   pi.registerProvider("kiro", {
     baseUrl: API_BASE,
-    apiKey: "KIRO_API_KEY",
+    // OMP resolves apiKey as an env var name and keeps the literal when unset,
+    // which outranks the OAuth credential. Declare it only when actually set.
+    ...(process.env.KIRO_API_KEY ? { apiKey: "KIRO_API_KEY" } : {}),
     authHeader: true,
     api: "kiro-custom" as never,
     streamSimple: streamKiro as never,
