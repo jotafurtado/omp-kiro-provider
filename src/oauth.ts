@@ -475,7 +475,8 @@ export async function refreshToken(credentials: OMPCredentials): Promise<OMPCred
 
   const refreshed = await refreshKiroToken(toFull(credentials, meta))
   const result = fromFull(refreshed)
-  if (!own) writeMeta(result.meta)
+  // getStoredProfileArn() reads the sidecar, so a renewed profile ARN must reach it too.
+  writeMeta(result.meta)
   return result.creds
 }
 

@@ -11,7 +11,7 @@ const previousHome = process.env.HOME
 const previousProfile = process.env.USERPROFILE
 process.env.HOME = home
 process.env.USERPROFILE = home
-const { login, refreshToken } = await import("../src/oauth.ts")
+const { login, refreshToken, getStoredProfileArn } = await import("../src/oauth.ts")
 const { createStreamKiro } = await import("../src/core.ts")
 after(() => {
   if (previousHome === undefined) delete process.env.HOME
@@ -198,5 +198,22 @@ describe("single Kiro identity", () => {
     assert.equal(organization.accountId, apiKey.accountId)
     assert.ok(builderId.accountId)
     assert.equal((await refreshToken(organization)).accountId, organization.accountId)
+  })
+})
+
+describe("profile ARN after a social refresh", () => {
+  it("exposes the renewed profile ARN even when the credential carries its own metadata", async (t) => {
+    const oldArn = "arn:aws:codewhisperer:us-east-1:111111111111:profile/OLD"
+    const newArn = "arn:aws:codewhisperer:us-east-1:111111111111:profile/NEW"
+    t.mock.method(globalThis, "fetch", async () =>
+      response({ accessToken: "renewed", refreshToken: "rotated", expiresIn: 3600, profileArn: newArn }))
+
+    const renewed = await refreshToken({
+      access: "old", refresh: "refresh", expires: 0,
+      accountId: "kiro", method: "social", region: "us-east-1", profileArn: oldArn,
+    })
+
+    assert.equal(renewed.profileArn, newArn)
+    assert.equal(getStoredProfileArn(), newArn)
   })
 })
