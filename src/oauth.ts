@@ -9,7 +9,7 @@
  * 1. kiro-cli SQLite database (preferred — always fresh, actively maintained)
  * 2. Kiro IDE ~/.aws/sso/cache/kiro-auth-token-cli.json or kiro-auth-token.json (fallback)
  * 3. API Key (ksk_xxx)
- * 4. OIDC device code flow (Builder ID browser login)
+ * 4. OIDC device code flow (Builder ID or IAM Identity Center browser login)
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
@@ -312,12 +312,13 @@ export async function login(callbacks: import("./types.ts").OAuthLoginCallbacks)
 
   const choice = await callbacks.onPrompt({
     message:
-      "Choose login method:\n" +
-      `1. Reuse existing login (kiro-cli or Kiro IDE)${existing ? " [DETECTED]" : ""}\n` +
-      "2. Paste API Key (ksk_xxx)\n" +
-      "3. Paste Refresh Token\n" +
-      "4. Browser Login (Builder ID)\n" +
-      "Enter 1-4:",
+      "Sign in to Kiro\n\n" +
+      `  1  Reuse existing login (Kiro CLI or IDE)${existing ? "  · detected" : ""}\n` +
+      "  2  API key (ksk_…)\n" +
+      "  3  Refresh token\n" +
+      "  4  AWS Builder ID  · browser\n" +
+      "  5  Your organization (IAM Identity Center)  · browser\n\n" +
+      "Choose an option:",
   })
 
   switch (choice.trim()) {
@@ -358,14 +359,14 @@ export async function login(callbacks: import("./types.ts").OAuthLoginCallbacks)
     }
 
     case "2": {
-      const raw = await callbacks.onPrompt({ message: "Paste your Kiro API Key (ksk_xxx):" })
+      const raw = await callbacks.onPrompt({ message: "Paste your Kiro API key:", placeholder: "ksk_…", secret: true })
       const apiKey = sanitizeApiKey(raw)
       if (!apiKey) throw new Error("No API key provided")
       return credentialsFromApiKey(apiKey)
     }
 
     case "3": {
-      const raw = await callbacks.onPrompt({ message: "Paste your refresh token:" })
+      const raw = await callbacks.onPrompt({ message: "Paste your refresh token:", secret: true })
       const refreshToken = sanitizeApiKey(raw)
       if (!refreshToken) throw new Error("No refresh token provided")
 
@@ -378,6 +379,29 @@ export async function login(callbacks: import("./types.ts").OAuthLoginCallbacks)
 
     case "4": {
       const full = await runDeviceCodeFlow(callbacks)
+      const result = fromFull(full)
+      writeMeta(result.meta)
+      return result.creds
+    }
+
+    case "5": {
+      const startUrl = (await callbacks.onPrompt({
+        message: "IAM Identity Center start URL:",
+        placeholder: "https://your-organization.awsapps.com/start",
+      })).trim()
+      if (!URL.canParse(startUrl) || new URL(startUrl).protocol !== "https:") {
+        throw new Error("IAM Identity Center start URL must be an HTTPS URL.")
+      }
+      const region = (await callbacks.onPrompt({
+        message: `IAM Identity Center region (default: ${DEFAULT_REGION}):`,
+        placeholder: DEFAULT_REGION,
+        allowEmpty: true,
+      })).trim() || DEFAULT_REGION
+      if (!/^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(region)) {
+        throw new Error("Enter the AWS region of your IAM Identity Center instance.")
+      }
+      callbacks.onProgress?.(`Starting organization sign-in in ${region}...`)
+      const full = await runDeviceCodeFlow(callbacks, region, startUrl)
       const result = fromFull(full)
       writeMeta(result.meta)
       return result.creds

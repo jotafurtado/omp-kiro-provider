@@ -182,10 +182,11 @@ export interface CoreDependencies {
 // Kiro-specific auth metadata (stored separately from OMP credentials)
 // ---------------------------------------------------------------------------
 export interface OAuthAuthInfo { url: string; instructions?: string }
-export interface OAuthPrompt { message: string; placeholder?: string; allowEmpty?: boolean }
+export interface OAuthPrompt { message: string; placeholder?: string; allowEmpty?: boolean; secret?: boolean }
 export interface OAuthLoginCallbacks {
   onAuth(info: OAuthAuthInfo): void | Promise<void>
   onPrompt(prompt: OAuthPrompt): Promise<string>
+  onProgress?(message: string): void
 }
 // ---------------------------------------------------------------------------
 // Kiro-specific auth metadata (stored separately from OMP credentials)
