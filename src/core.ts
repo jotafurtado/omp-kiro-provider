@@ -7,7 +7,7 @@
  * - INSUFFICIENT_MODEL_CAPACITY inner retry (common on free tier)
  * - First-token timeout (180s) + idle stream timeout (300s)
  * - Empty response detection with retry
- * - profileArn conditional omission for Builder ID
+ * - Account profile resolution for OAuth and API keys
  * - Ban detection (TEMPORARILY_SUSPENDED) in HTTP errors AND stream content
  * - Live event emission with retry buffering before the first visible delta
  */
@@ -35,6 +35,7 @@ import { buildKiroPayload, resolveToolName } from "./converters.ts"
 import { AwsEventStreamParser } from "./eventstream.ts"
 import { ThinkingTagParser } from "./thinking-parser.ts"
 import { parseBracketToolCalls } from "./bracket-tool-parser.ts"
+import { resolveKiroProfileArn } from "./dynamic-models.ts"
 
 export * from "./converters.ts"
 export * from "./eventstream.ts"
@@ -169,40 +170,6 @@ function resyncCliToken(): string | undefined {
     return undefined
   }
   return tryReadCliToken()
-}
-// ---------------------------------------------------------------------------
-// Dynamic profileArn resolution via ListAvailableProfiles (mikeyobrien/hongyilyu pattern)
-// ---------------------------------------------------------------------------
-const profileArnCache = new Map<string, string>()
-async function resolveProfileArn(
-  accessToken: string,
-  endpoint: string,
-  fetchImpl: typeof fetch,
-): Promise<string | undefined> {
-  const cached = profileArnCache.get(endpoint)
-  if (cached !== undefined) return cached
-  try {
-    const ep = new URL(endpoint)
-    ep.pathname = ep.pathname.replace(/\/generateAssistantResponse\/?$/, "/")
-    ep.search = ""
-    ep.hash = ""
-    const r = await fetchImpl(ep.toString(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-amz-json-1.0",
-        Authorization: `Bearer ${accessToken}`,
-        "X-Amz-Target": "AmazonCodeWhispererService.ListAvailableProfiles",
-      },
-      body: "{}",
-    })
-    if (!r.ok) return undefined
-    const j = (await r.json()) as { profiles?: Array<{ arn?: string }> }
-    const arn = j.profiles?.find((p) => p.arn)?.arn
-    if (arn) profileArnCache.set(endpoint, arn)
-    return arn
-  } catch {
-    return undefined
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +381,6 @@ export function createStreamKiro(deps: CoreDependencies) {
           return JSON.parse(readFileSync(p, "utf-8")) as { method?: string; profileArn?: string; region?: string }
         } catch { return null }
       })()
-      const authMethod = metaRaw?.method ?? "social"
 
       const abortUpstream = () => {
         if (!controller.signal.aborted) controller.abort()
@@ -610,17 +576,15 @@ export function createStreamKiro(deps: CoreDependencies) {
       }
 
       try {
-        // Resolve profileArn: only needed for Kiro social/OIDC sessions.
-        // Builder ID (device code flow) doesn't support profileArn or ListAvailableProfiles —
-        // including either causes a 403. Skip entirely when no profileArn in metadata.
-        let profileArn: string | undefined
-        if (metaRaw?.profileArn) {
-          profileArn = metaRaw.profileArn
-        } else if (authMethod === "social") {
-          // Only resolve profileArn for social (Google/GitHub) auth.
-          // Builder ID / IDC tokens get 403 from ListAvailableProfiles.
-          profileArn = await resolveProfileArn(apiKey, `${apiBase}/generateAssistantResponse`, fetchImpl)
-        }
+        const managementBase = new URL(apiBase)
+        managementBase.hostname = managementBase.hostname.replace(/^runtime\./, "management.")
+        const profileArn = await resolveKiroProfileArn({
+          apiKey,
+          apiBase: managementBase.toString(),
+          fetchImpl,
+          profileArn: metaRaw?.profileArn,
+        })
+        if (!profileArn) throw new Error("No accessible Kiro profile found for this account.")
 
         // --- Thinking / reasoning mode ---
         // Inject <thinking_mode> into system prompt so the model produces <thinking> tags.
@@ -727,9 +691,8 @@ export function createStreamKiro(deps: CoreDependencies) {
             } finally {
               clearTimeout(timeoutId)
             }
-            // Don't retry on ban detection; bust profileArn cache on 403
+            // Don't retry on ban detection.
             if (response.status === 403) {
-              profileArnCache.delete(`${apiBase}/generateAssistantResponse`)
               const peekBody = await response.clone().text().catch(() => "")
               if (peekBody.includes("TEMPORARILY_SUSPENDED")) break
               if (!cliIdentityResynced && peekBody.includes("bearer token included in the request is invalid")) {

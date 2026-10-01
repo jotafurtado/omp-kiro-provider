@@ -28,7 +28,7 @@ import { calculateCost, createAssistantMessageEventStream } from "./src/runtime.
 
 const DEFAULT_REGION = "us-east-1"
 const region = process.env.KIRO_REGION ?? DEFAULT_REGION
-const DEFAULT_API_BASE = `https://q.${region}.amazonaws.com`
+const DEFAULT_API_BASE = `https://runtime.${region}.kiro.dev`
 const API_BASE = process.env.KIRO_API_BASE ?? DEFAULT_API_BASE
 const MODELS = loadModels()
 
@@ -69,7 +69,7 @@ export default function (pi: ExtensionAPI) {
     models: MODELS,
     fetchDynamicModels: (apiKey?: string) => fetchDynamicKiroModels({
       apiKey,
-      apiBase: API_BASE,
+      apiBase: `https://management.${region}.kiro.dev`,
       overlay: MODELS,
       profileArn: getStoredProfileArn(),
     }),

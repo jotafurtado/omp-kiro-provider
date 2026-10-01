@@ -2,14 +2,14 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
-  buildListAvailableModelsUrl,
   fetchDynamicKiroModels,
   mergeLiveWithOverlay,
   parseLiveModels,
   type OverlayModel,
 } from "../src/dynamic-models.ts"
 
-const API_BASE = "https://q.us-east-1.amazonaws.com"
+const API_BASE = "https://management.us-east-1.kiro.dev"
+const PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:123456789012:profile/default"
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 
 const OVERLAY: OverlayModel[] = [
@@ -51,21 +51,6 @@ function header(init: RequestInit | undefined, name: string): string | undefined
   return (headers as Record<string, string>)[name]
 }
 
-describe("buildListAvailableModelsUrl", () => {
-  it("strips trailing slashes and always sets origin", () => {
-    const url = new URL(buildListAvailableModelsUrl(`${API_BASE}///`))
-    assert.equal(url.origin + url.pathname, `${API_BASE}/ListAvailableModels`)
-    assert.equal(url.searchParams.get("origin"), "AI_EDITOR")
-    assert.equal(url.searchParams.get("profileArn"), null)
-  })
-
-  it("encodes profileArn only when provided", () => {
-    const arn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/default"
-    const url = new URL(buildListAvailableModelsUrl(API_BASE, "AI_EDITOR", arn))
-    assert.equal(url.searchParams.get("profileArn"), arn)
-    assert.match(url.search, /profileArn=arn%3Aaws%3A/)
-  })
-})
 
 describe("parseLiveModels", () => {
   it("parses models and availableModels", () => {
@@ -269,52 +254,34 @@ describe("fetchDynamicKiroModels", () => {
     assert.deepEqual(blank, [])
   })
 
-  it("sends Authorization Bearer and origin=AI_EDITOR", async () => {
-    let url = ""
-    let init: RequestInit | undefined
-    const fetchImpl = (async (input: RequestInfo | URL, requestInit?: RequestInit) => {
-      url = String(input)
-      init = requestInit
-      return jsonResponse(200, { models: [{ modelId: "new-live", modelName: "New Live" }] })
+  it("discovers Opus 5.5 through the OAuth account profile on the management API", async () => {
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (header(init, "Authorization") !== "Bearer token-1") return jsonResponse(403, {})
+      if (url.pathname === "/List-Available-Profiles" && init?.method === "POST") {
+        return jsonResponse(200, { profiles: [{ arn: PROFILE_ARN }] })
+      }
+      if (url.pathname === "/List-Available-Models" && url.searchParams.get("origin") === "KIRO_CLI"
+        && url.searchParams.get("profileArn") === PROFILE_ARN) {
+        return jsonResponse(200, { models: [{
+          modelId: "claude-opus-5.5",
+          modelName: "Claude Opus 5.5",
+          supportedInputTypes: ["TEXT", "IMAGE"],
+          additionalModelRequestFieldsSchema: { type: "object", properties: { thinking: { type: "object" } } },
+        }] })
+      }
+      return jsonResponse(403, {})
     }) as typeof fetch
-
-    await fetchDynamicKiroModels({
-      apiKey: "token-1",
-      apiBase: API_BASE,
-      overlay: OVERLAY,
-      fetchImpl,
-    })
-
-    const parsed = new URL(url)
-    assert.equal(parsed.pathname, "/ListAvailableModels")
-    assert.equal(parsed.searchParams.get("origin"), "AI_EDITOR")
-    assert.equal(header(init, "Authorization"), "Bearer token-1")
-    assert.equal(header(init, "Accept"), "application/json")
-    assert.equal(header(init, "X-Amz-Target"), undefined)
-    assert.equal(init?.method, "GET")
-  })
-
-  it("omits profileArn on the first request and sends it only on retry after non-2xx", async () => {
-    const arn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/default"
-    const urls: string[] = []
-    const fetchImpl = (async (input: RequestInfo | URL) => {
-      urls.push(String(input))
-      if (urls.length === 1) return jsonResponse(403, { message: "forbidden" })
-      return jsonResponse(200, { models: [{ modelId: "retried", modelName: "Retried" }] })
-    }) as typeof fetch
-
     const models = await fetchDynamicKiroModels({
       apiKey: "token-1",
       apiBase: API_BASE,
       overlay: OVERLAY,
       fetchImpl,
-      profileArn: arn,
     })
-
-    assert.equal(urls.length, 2)
-    assert.equal(new URL(urls[0]).searchParams.get("profileArn"), null)
-    assert.equal(new URL(urls[1]).searchParams.get("profileArn"), arn)
-    assert.ok(models.some((model) => model.id === "retried"))
+    const opus = models.find((model) => model.id === "claude-opus-5-5")
+    assert.equal(opus?.name, "Claude Opus 5.5")
+    assert.equal(opus?.reasoning, true)
+    assert.deepEqual(opus?.input, ["text", "image"])
     assert.ok(models.some((model) => model.id === "overlay-only"))
   })
 
@@ -331,6 +298,7 @@ describe("fetchDynamicKiroModels", () => {
     for (const fetchImpl of cases) {
       const result = await fetchDynamicKiroModels({
         apiKey: "token-1",
+        profileArn: PROFILE_ARN,
         apiBase: API_BASE,
         overlay: OVERLAY,
         fetchImpl,
@@ -343,6 +311,7 @@ describe("fetchDynamicKiroModels", () => {
   it("returns an empty list when the actual body exceeds maxBodyBytes", async () => {
     const result = await fetchDynamicKiroModels({
       apiKey: "token-1",
+      profileArn: PROFILE_ARN,
       apiBase: API_BASE,
       overlay: OVERLAY,
       maxBodyBytes: 16,
@@ -366,6 +335,7 @@ describe("fetchDynamicKiroModels", () => {
     ]
     const result = await fetchDynamicKiroModels({
       apiKey: "token-1",
+      profileArn: PROFILE_ARN,
       apiBase: API_BASE,
       overlay,
       fetchImpl: (async () => jsonResponse(200, {
@@ -379,6 +349,7 @@ describe("fetchDynamicKiroModels", () => {
   it("merges overlay-only ids with new live ids on success", async () => {
     const result = await fetchDynamicKiroModels({
       apiKey: "token-1",
+      profileArn: PROFILE_ARN,
       apiBase: API_BASE,
       overlay: OVERLAY,
       fetchImpl: (async () => jsonResponse(200, {
@@ -408,6 +379,7 @@ describe("fetchDynamicKiroModels", () => {
     const chunk = new Uint8Array(12)
     const result = await fetchDynamicKiroModels({
       apiKey: "token-1",
+      profileArn: PROFILE_ARN,
       apiBase: API_BASE,
       overlay: OVERLAY,
       maxBodyBytes: 16,
@@ -432,6 +404,7 @@ describe("fetchDynamicKiroModels", () => {
   it("returns an empty list when the response body stalls past timeoutMs", async () => {
     const result = await fetchDynamicKiroModels({
       apiKey: "token-1",
+      profileArn: PROFILE_ARN,
       apiBase: API_BASE,
       overlay: OVERLAY,
       timeoutMs: 20,
@@ -450,6 +423,7 @@ describe("fetchDynamicKiroModels", () => {
   it("returns an empty list when the fetch times out", async () => {
     const result = await fetchDynamicKiroModels({
       apiKey: "token-1",
+      profileArn: PROFILE_ARN,
       apiBase: API_BASE,
       overlay: OVERLAY,
       timeoutMs: 20,
@@ -478,6 +452,7 @@ describe("fetchDynamicKiroModels", () => {
     let calls = 0
     const result = await fetchDynamicKiroModels({
       apiKey: "token-1",
+      profileArn: PROFILE_ARN,
       apiBase: API_BASE,
       overlay: OVERLAY,
       fetchImpl: (async () => {
@@ -487,5 +462,38 @@ describe("fetchDynamicKiroModels", () => {
     })
     assert.equal(calls, 1)
     assert.deepEqual(result, [])
+  })
+
+  it("uses the API key's own profile rather than a saved OAuth profile", async () => {
+    const keyProfile = "arn:aws:codewhisperer:us-east-1:987654321098:profile/api-key"
+    const models = await fetchDynamicKiroModels({
+      apiKey: "ksk_test",
+      apiBase: API_BASE,
+      profileArn: PROFILE_ARN,
+      overlay: OVERLAY,
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input))
+        if (url.pathname === "/" && header(init, "X-Amz-Target") === "AmazonCodeWhispererService.GetProfile") {
+          return jsonResponse(200, { profile: { arn: keyProfile } })
+        }
+        if (url.pathname === "/List-Available-Models" && url.searchParams.get("profileArn") === keyProfile) {
+          return jsonResponse(200, { models: [{ modelId: "claude-opus-5.5" }] })
+        }
+        return jsonResponse(403, {})
+      }) as typeof fetch,
+    })
+    assert.ok(models.some((model) => model.id === "claude-opus-5-5"))
+  })
+
+  it("does not publish a live catalog when the account has no accessible profile", async () => {
+    for (const payload of [{ profiles: [] }, { profiles: [{}] }, { message: "forbidden" }]) {
+      const models = await fetchDynamicKiroModels({
+        apiKey: "token-1",
+        apiBase: API_BASE,
+        overlay: OVERLAY,
+        fetchImpl: (async () => jsonResponse(200, payload)) as typeof fetch,
+      })
+      assert.deepEqual(models, [])
+    }
   })
 })

@@ -13,6 +13,7 @@ export type LiveModel = {
   id: string
   name: string
   reasoning?: boolean
+  input?: ("text" | "image")[]
   contextWindow?: number
   maxTokens?: number
 }
@@ -33,16 +34,10 @@ const DEFAULT_MAX_BODY_BYTES = 1_048_576
 const DEFAULT_CONTEXT_WINDOW = 128_000
 const DEFAULT_MAX_TOKENS = 8192
 
-export function buildListAvailableModelsUrl(
-  apiBase: string,
-  origin = "AI_EDITOR",
-  profileArn?: string,
-): string {
-  const url = new URL(`${apiBase.replace(/\/+$/, "")}/ListAvailableModels`)
-  url.searchParams.set("origin", origin)
-  if (profileArn !== undefined && profileArn !== "") {
-    url.searchParams.set("profileArn", profileArn)
-  }
+function buildListAvailableModelsUrl(apiBase: string, profileArn: string): string {
+  const url = new URL(`${apiBase.replace(/\/+$/, "")}/List-Available-Models`)
+  url.searchParams.set("origin", "KIRO_CLI")
+  url.searchParams.set("profileArn", profileArn)
   return url.toString()
 }
 
@@ -69,6 +64,9 @@ export function parseLiveModels(payload: unknown): LiveModel[] | null {
     }
     const reasoning = readLiveReasoning(entry)
     if (reasoning !== undefined) live.reasoning = reasoning
+    if (Array.isArray(entry.supportedInputTypes)) {
+      live.input = entry.supportedInputTypes.includes("IMAGE") ? ["text", "image"] : ["text"]
+    }
     const limits = isRecord(entry.tokenLimits) ? entry.tokenLimits : undefined
     if (limits) {
       const contextWindow = positiveInt(limits.maxInputTokens)
@@ -93,7 +91,7 @@ export function mergeLiveWithOverlay(
       id: item.id,
       name: item.name || item.id,
       reasoning: item.reasoning === true,
-      input: ["text"],
+      input: item.input ? [...item.input] : ["text"],
       contextWindow: item.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
       maxTokens: item.maxTokens ?? DEFAULT_MAX_TOKENS,
       cost: { ...ZERO_COST },
@@ -115,30 +113,52 @@ export async function fetchDynamicKiroModels(
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES
 
   try {
-    const first = await requestCatalog(
+    const profileArn = await resolveKiroProfileArn(options)
+    if (!profileArn) return []
+    const payload = await requestManagement(
       fetchImpl,
-      buildListAvailableModelsUrl(options.apiBase),
+      buildListAvailableModelsUrl(options.apiBase, profileArn),
       apiKey,
-      options.overlay,
       timeoutMs,
       maxBodyBytes,
     )
-    if (first.kind === "ok") return first.models ?? []
-    if (options.profileArn === undefined || options.profileArn === "") return []
-
-    const retry = await requestCatalog(
-      fetchImpl,
-      buildListAvailableModelsUrl(options.apiBase, "AI_EDITOR", options.profileArn),
-      apiKey,
-      options.overlay,
-      timeoutMs,
-      maxBodyBytes,
-    )
-    if (retry.kind === "ok") return retry.models ?? []
-    return []
+    const live = parseLiveModels(payload)
+    return live?.length ? mergeLiveWithOverlay(options.overlay, live) : []
   } catch {
     return []
   }
+}
+
+export async function resolveKiroProfileArn(
+  options: Omit<FetchDynamicKiroModelsOptions, "overlay">,
+): Promise<string | undefined> {
+  const apiKey = options.apiKey?.trim() ?? ""
+  if (!apiKey) return undefined
+  const isApiKey = apiKey.startsWith("ksk_")
+  if (!isApiKey && options.profileArn?.trim()) return options.profileArn.trim()
+  const profile = await requestManagement(
+    options.fetchImpl ?? fetch,
+    isApiKey
+      ? `${options.apiBase.replace(/\/+$/, "")}/`
+      : `${options.apiBase.replace(/\/+$/, "")}/List-Available-Profiles`,
+    apiKey,
+    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
+    isApiKey
+      ? { "Content-Type": "application/x-amz-json-1.0", "X-Amz-Target": "AmazonCodeWhispererService.GetProfile" }
+      : { "Content-Type": "application/json" },
+  )
+  if (!isRecord(profile)) return undefined
+  if (isApiKey) {
+    return isRecord(profile.profile) ? nonEmptyString(profile.profile.arn) : undefined
+  }
+  const profiles = Array.isArray(profile.profiles) ? profile.profiles : []
+  for (const entry of profiles) {
+    if (!isRecord(entry)) continue
+    const profileArn = nonEmptyString(entry.arn)
+    if (profileArn) return profileArn
+  }
+  return undefined
 }
 
 function copyOverlay(overlay: readonly OverlayModel[]): OverlayModel[] {
@@ -149,46 +169,32 @@ function copyOverlay(overlay: readonly OverlayModel[]): OverlayModel[] {
   }))
 }
 
-async function requestCatalog(
+async function requestManagement(
   fetchImpl: typeof fetch,
   url: string,
   apiKey: string,
-  overlay: readonly OverlayModel[],
   timeoutMs: number,
   maxBodyBytes: number,
-): Promise<{ kind: "ok"; models: OverlayModel[] | null } | { kind: "http" }> {
+  postHeaders?: Record<string, string>,
+): Promise<unknown> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const response = await fetchImpl(url, {
-      method: "GET",
+      method: postHeaders ? "POST" : "GET",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         Accept: "application/json",
+        ...postHeaders,
       },
+      ...(postHeaders ? { body: "{}" } : {}),
       signal: controller.signal,
     })
-    if (!is2xx(response)) return { kind: "http" }
-    return {
-      kind: "ok",
-      models: await modelsFromResponse(response, overlay, maxBodyBytes, controller.signal),
-    }
+    if (!is2xx(response)) return undefined
+    return await readBoundedJson(response, maxBodyBytes, controller.signal)
   } finally {
     clearTimeout(timer)
   }
-}
-
-async function modelsFromResponse(
-  response: Response,
-  overlay: readonly OverlayModel[],
-  maxBodyBytes: number,
-  signal: AbortSignal,
-): Promise<OverlayModel[] | null> {
-  const payload = await readBoundedJson(response, maxBodyBytes, signal)
-  if (payload === undefined) return null
-  const live = parseLiveModels(payload)
-  if (!live || live.length === 0) return null
-  return mergeLiveWithOverlay(overlay, live)
 }
 
 async function readBoundedJson(
@@ -303,5 +309,8 @@ function readLiveReasoning(item: Record<string, unknown>): boolean | undefined {
   if (typeof item.supportsThinking === "boolean") return item.supportsThinking
   const capabilities = item.capabilities
   if (isRecord(capabilities) && typeof capabilities.thinking === "boolean") return capabilities.thinking
+  // Kiro's management catalog advertises thinking through the per-model request schema.
+  const schema = item.additionalModelRequestFieldsSchema
+  if (isRecord(schema) && isRecord(schema.properties) && isRecord(schema.properties.thinking)) return true
   return undefined
 }
