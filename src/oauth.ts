@@ -389,14 +389,16 @@ export async function login(callbacks: import("./types.ts").OAuthLoginCallbacks)
         message: "IAM Identity Center start URL:",
         placeholder: "https://your-organization.awsapps.com/start",
       })).trim()
-      if (!URL.canParse(startUrl) || new URL(startUrl).protocol !== "https:") {
+      let validStartUrl = false
+      try { validStartUrl = new URL(startUrl).protocol === "https:" } catch { /* invalid URL */ }
+      if (!validStartUrl) {
         throw new Error("IAM Identity Center start URL must be an HTTPS URL.")
       }
       const region = (await callbacks.onPrompt({
         message: `IAM Identity Center region (default: ${DEFAULT_REGION}):`,
         placeholder: DEFAULT_REGION,
         allowEmpty: true,
-      })).trim() || DEFAULT_REGION
+      })).trim().toLowerCase() || DEFAULT_REGION
       if (!/^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(region)) {
         throw new Error("Enter the AWS region of your IAM Identity Center instance.")
       }

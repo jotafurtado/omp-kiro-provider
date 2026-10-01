@@ -203,6 +203,8 @@ function buildKiroHeaders(
 
 export function createStreamKiro(deps: CoreDependencies) {
   const apiBase = deps.apiBase
+  const managementBase = deps.managementBase ?? apiBase.replace(/^(https?:\/\/)runtime\./, "$1management.")
+  const profileArnCache = new Map<string, string>()
   const fetchImpl = deps.fetchImpl ?? fetch
   const cwd = deps.cwd ?? (() => process.cwd())
   const now = deps.now ?? (() => Date.now())
@@ -576,15 +578,25 @@ export function createStreamKiro(deps: CoreDependencies) {
       }
 
       try {
-        const managementBase = new URL(apiBase)
-        managementBase.hostname = managementBase.hostname.replace(/^runtime\./, "management.")
-        const profileArn = await resolveKiroProfileArn({
-          apiKey,
-          apiBase: managementBase.toString(),
-          fetchImpl,
-          profileArn: metaRaw?.profileArn,
-        })
-        if (!profileArn) throw new Error("No accessible Kiro profile found for this account.")
+        let profileArn = profileArnCache.get(apiKey)
+        if (!profileArn) {
+          try {
+            profileArn = await resolveKiroProfileArn({
+              apiKey,
+              apiBase: managementBase,
+              fetchImpl,
+              profileArn: metaRaw?.profileArn,
+              env: deps.env,
+              signal: options?.signal,
+            })
+          } catch (resolveError: unknown) {
+            if (options?.signal?.aborted) throw resolveError
+            const reason = resolveError instanceof Error ? resolveError.message : String(resolveError)
+            throw new Error(`Kiro profile lookup failed (${managementBase}): ${reason}`)
+          }
+          if (!profileArn) throw new Error("No accessible Kiro profile found for this account.")
+          profileArnCache.set(apiKey, profileArn)
+        }
 
         // --- Thinking / reasoning mode ---
         // Inject <thinking_mode> into system prompt so the model produces <thinking> tags.

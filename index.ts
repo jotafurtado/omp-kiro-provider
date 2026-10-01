@@ -30,6 +30,7 @@ const DEFAULT_REGION = "us-east-1"
 const region = process.env.KIRO_REGION ?? DEFAULT_REGION
 const DEFAULT_API_BASE = `https://runtime.${region}.kiro.dev`
 const API_BASE = process.env.KIRO_API_BASE ?? DEFAULT_API_BASE
+const MANAGEMENT_BASE = `https://management.${region}.kiro.dev`
 const MODELS = loadModels()
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,7 @@ const MODELS = loadModels()
 
 const streamKiro = createStreamKiro({
   apiBase: API_BASE,
+  managementBase: MANAGEMENT_BASE,
   fetchImpl: fetch,
   createStream: createAssistantMessageEventStream,
   cwd: () => process.cwd(),
@@ -71,7 +73,7 @@ export default function (pi: ExtensionAPI) {
     models: MODELS,
     fetchDynamicModels: (apiKey?: string) => fetchDynamicKiroModels({
       apiKey,
-      apiBase: `https://management.${region}.kiro.dev`,
+      apiBase: MANAGEMENT_BASE,
       overlay: MODELS,
       profileArn: getStoredProfileArn(),
     }),

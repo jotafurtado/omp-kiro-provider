@@ -2,9 +2,11 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
+  BUILDER_ID_PROFILE_ARN,
   fetchDynamicKiroModels,
   mergeLiveWithOverlay,
   parseLiveModels,
+  resolveKiroProfileArn,
   type OverlayModel,
 } from "../src/dynamic-models.ts"
 
@@ -495,5 +497,29 @@ describe("fetchDynamicKiroModels", () => {
       })
       assert.deepEqual(models, [])
     }
+  })
+})
+
+describe("resolveKiroProfileArn", () => {
+  const request = (fetchImpl: typeof fetch, env: Record<string, string | undefined> = {}) =>
+    resolveKiroProfileArn({ apiKey: "token-1", apiBase: API_BASE, fetchImpl, env })
+
+  it("uses the shared Builder ID profile when the token may not list profiles", async () => {
+    const arn = await request((async () =>
+      jsonResponse(403, { message: "User is not authorized to access this feature." })) as typeof fetch)
+    assert.equal(arn, BUILDER_ID_PROFILE_ARN)
+  })
+
+  it("does not mistake an invalid token for a Builder ID token", async () => {
+    const arn = await request((async () => jsonResponse(403, { message: "Invalid token" })) as typeof fetch)
+    assert.equal(arn, undefined)
+  })
+
+  it("prefers KIRO_PROFILE_ARN over any network lookup", async () => {
+    let calls = 0
+    const arn = await request((async () => { calls++; return jsonResponse(200, { profiles: [] }) }) as typeof fetch,
+      { KIRO_PROFILE_ARN: PROFILE_ARN })
+    assert.equal(arn, PROFILE_ARN)
+    assert.equal(calls, 0)
   })
 })

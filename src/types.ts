@@ -168,6 +168,8 @@ export interface AssistantMessageEventStreamLike extends AsyncIterable<Assistant
 
 export interface CoreDependencies {
   apiBase: string
+  /** Management plane base URL; derived from `apiBase` when omitted. */
+  managementBase?: string
   fetchImpl: typeof fetch
   createStream: () => AssistantMessageEventStreamLike
   cwd: () => string

@@ -121,7 +121,7 @@ describe("organization login", () => {
       cwd: () => home,
       now: () => Date.now(),
       uuid: () => "test-conversation",
-      env: {},
+      env: { OMP_KIRO_STREAM_GATE: "0" },
       authPaths: [],
       homeDir: home,
       calculateCost: () => {},

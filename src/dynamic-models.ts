@@ -26,8 +26,11 @@ export type FetchDynamicKiroModelsOptions = {
   timeoutMs?: number
   maxBodyBytes?: number
   profileArn?: string
+  env?: Record<string, string | undefined>
+  signal?: AbortSignal
 }
 
+export const BUILDER_ID_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX"
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 const DEFAULT_TIMEOUT_MS = 10_000
 const DEFAULT_MAX_BODY_BYTES = 1_048_576
@@ -65,7 +68,7 @@ export function parseLiveModels(payload: unknown): LiveModel[] | null {
     const reasoning = readLiveReasoning(entry)
     if (reasoning !== undefined) live.reasoning = reasoning
     if (Array.isArray(entry.supportedInputTypes)) {
-      live.input = entry.supportedInputTypes.includes("IMAGE") ? ["text", "image"] : ["text"]
+      live.input = entry.supportedInputTypes.some((type) => String(type).toUpperCase() === "IMAGE") ? ["text", "image"] : ["text"]
     }
     const limits = isRecord(entry.tokenLimits) ? entry.tokenLimits : undefined
     if (limits) {
@@ -115,7 +118,7 @@ export async function fetchDynamicKiroModels(
   try {
     const profileArn = await resolveKiroProfileArn(options)
     if (!profileArn) return []
-    const payload = await requestManagement(
+    const { body: payload } = await requestManagement(
       fetchImpl,
       buildListAvailableModelsUrl(options.apiBase, profileArn),
       apiKey,
@@ -135,8 +138,12 @@ export async function resolveKiroProfileArn(
   const apiKey = options.apiKey?.trim() ?? ""
   if (!apiKey) return undefined
   const isApiKey = apiKey.startsWith("ksk_")
-  if (!isApiKey && options.profileArn?.trim()) return options.profileArn.trim()
-  const profile = await requestManagement(
+  if (!isApiKey) {
+    const override = nonEmptyString((options.env ?? process.env).KIRO_PROFILE_ARN)
+    if (override) return override
+    if (options.profileArn?.trim()) return options.profileArn.trim()
+  }
+  const { status, body: profile, message } = await requestManagement(
     options.fetchImpl ?? fetch,
     isApiKey
       ? `${options.apiBase.replace(/\/+$/, "")}/`
@@ -147,11 +154,17 @@ export async function resolveKiroProfileArn(
     isApiKey
       ? { "Content-Type": "application/x-amz-json-1.0", "X-Amz-Target": "AmazonCodeWhispererService.GetProfile" }
       : { "Content-Type": "application/json" },
+    options.signal,
   )
+  // Builder ID tokens are not allowed to list profiles; they all share one public profile.
+  if (!isApiKey && status === 403 && message?.includes("not authorized to access this feature")) {
+    return BUILDER_ID_PROFILE_ARN
+  }
   if (!isRecord(profile)) return undefined
   if (isApiKey) {
     return isRecord(profile.profile) ? nonEmptyString(profile.profile.arn) : undefined
   }
+  // Organization accounts may expose several profiles; the first one listed is used.
   const profiles = Array.isArray(profile.profiles) ? profile.profiles : []
   for (const entry of profiles) {
     if (!isRecord(entry)) continue
@@ -169,6 +182,8 @@ function copyOverlay(overlay: readonly OverlayModel[]): OverlayModel[] {
   }))
 }
 
+type ManagementResponse = { status: number; body: unknown; message?: string }
+
 async function requestManagement(
   fetchImpl: typeof fetch,
   url: string,
@@ -176,9 +191,13 @@ async function requestManagement(
   timeoutMs: number,
   maxBodyBytes: number,
   postHeaders?: Record<string, string>,
-): Promise<unknown> {
+  outerSignal?: AbortSignal,
+): Promise<ManagementResponse> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const onOuterAbort = () => controller.abort()
+  if (outerSignal?.aborted) controller.abort()
+  else outerSignal?.addEventListener("abort", onOuterAbort, { once: true })
   try {
     const response = await fetchImpl(url, {
       method: postHeaders ? "POST" : "GET",
@@ -190,10 +209,15 @@ async function requestManagement(
       ...(postHeaders ? { body: "{}" } : {}),
       signal: controller.signal,
     })
-    if (!is2xx(response)) return undefined
-    return await readBoundedJson(response, maxBodyBytes, controller.signal)
+    if (!is2xx(response)) {
+      // Error bodies are small; read them so callers can tell "not authorized" from "invalid token".
+      const errorBody = await readBoundedJson(response, maxBodyBytes, controller.signal).catch(() => undefined)
+      return { status: response.status, body: undefined, message: isRecord(errorBody) ? nonEmptyString(errorBody.message) : undefined }
+    }
+    return { status: response.status, body: await readBoundedJson(response, maxBodyBytes, controller.signal) }
   } finally {
     clearTimeout(timer)
+    outerSignal?.removeEventListener("abort", onOuterAbort)
   }
 }
 
@@ -311,6 +335,7 @@ function readLiveReasoning(item: Record<string, unknown>): boolean | undefined {
   if (isRecord(capabilities) && typeof capabilities.thinking === "boolean") return capabilities.thinking
   // Kiro's management catalog advertises thinking through the per-model request schema.
   const schema = item.additionalModelRequestFieldsSchema
-  if (isRecord(schema) && isRecord(schema.properties) && isRecord(schema.properties.thinking)) return true
+  if (isRecord(schema) && isRecord(schema.properties) && isRecord(schema.properties.thinking)
+    && schema.properties.thinking.type === "object") return true
   return undefined
 }
