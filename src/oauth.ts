@@ -54,10 +54,18 @@ function writeMeta(meta: KiroAuthMeta): void {
 // OMP-compatible credentials shape
 // ---------------------------------------------------------------------------
 
+/**
+ * Every Kiro login shares one identity so OMP replaces the previous credential instead of adding
+ * another. OMP keeps a single model catalog per provider, and accounts on different plans expose
+ * different models, so several accounts would make the catalog depend on which one answered.
+ */
+const KIRO_ACCOUNT_ID = "kiro"
+
 interface OMPCredentials {
   access: string
   refresh: string
   expires: number
+  accountId?: string
   method?: string
   region?: string
   clientId?: string
@@ -69,6 +77,7 @@ interface OMPCredentials {
 function embedMeta(creds: OMPCredentials, meta: KiroAuthMeta): OMPCredentials {
   return {
     ...creds,
+    accountId: KIRO_ACCOUNT_ID,
     method: meta.method,
     ...(meta.region ? { region: meta.region } : {}),
     ...(meta.clientId ? { clientId: meta.clientId } : {}),
@@ -90,7 +99,7 @@ function metaOf(creds: OMPCredentials): KiroAuthMeta | undefined {
 
 function credentialsFromApiKey(apiKey: string): OMPCredentials {
   writeMeta({ method: "apikey" })
-  return { access: apiKey, refresh: apiKey, expires: Date.now() + FAR_FUTURE_MS }
+  return { access: apiKey, refresh: apiKey, expires: Date.now() + FAR_FUTURE_MS, accountId: KIRO_ACCOUNT_ID }
 }
 
 /** Remove terminal paste wrappers, surrounding whitespace, control chars. */

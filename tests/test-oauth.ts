@@ -172,3 +172,31 @@ describe("refresh with several accounts", () => {
     assert.equal(renewedA.clientId, "client-a")
   })
 })
+
+describe("single Kiro identity", () => {
+  it("gives every login method and every renewal the same identity so OMP replaces the old credential", async (t) => {
+    t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      if (url.endsWith("/client/register")) return response({ clientId: "client", clientSecret: "secret" })
+      if (url.endsWith("/device_authorization")) return response({
+        deviceCode: "d", userCode: "C", verificationUri: "https://example.com/v", interval: 0, expiresIn: 600,
+      })
+      if (body.grantType === "refresh_token") return response({ accessToken: "renewed", refreshToken: "rotated", expiresIn: 3600 })
+      return response({ accessToken: "access", refreshToken: "refresh", expiresIn: 3600 })
+    })
+    const signIn = async (...answers: string[]) => {
+      const credentials = await login({ onPrompt: async () => answers.shift() ?? "", onAuth: () => {} })
+      if (typeof credentials === "string") throw new Error("Expected OAuth credentials")
+      return credentials
+    }
+    const builderId = await signIn("4")
+    const organization = await signIn("5", "https://example.awsapps.com/start", "")
+    const apiKey = await signIn("2", "ksk_example")
+
+    assert.equal(builderId.accountId, organization.accountId)
+    assert.equal(organization.accountId, apiKey.accountId)
+    assert.ok(builderId.accountId)
+    assert.equal((await refreshToken(organization)).accountId, organization.accountId)
+  })
+})
