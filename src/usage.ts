@@ -28,7 +28,7 @@ export interface UsageFetchParams {
 export interface UsageLimit {
   id: string
   label: string
-  scope: { provider: string; windowId?: string }
+  scope: { provider: string; windowId?: string; tier?: string; accountId?: string }
   window?: { id: string; label: string; resetsAt?: number; resetLabel?: string }
   amount: {
     used?: number
@@ -83,6 +83,7 @@ interface UsageLimitsResponse {
   usageBreakdownList?: UsageBreakdown[]
   subscriptionInfo?: { subscriptionTitle?: string }
   overageConfiguration?: { overageStatus?: string }
+  userInfo?: { userId?: string }
 }
 
 /** Kiro sends epoch seconds or ISO strings; OMP wants epoch milliseconds. */
@@ -104,6 +105,8 @@ function buildLimit(args: {
   window: { id: string; label: string; resetsAt?: number; resetLabel?: string }
   unit: UsageLimit["amount"]["unit"]
   notes?: string[]
+  tier?: string
+  accountId?: string
 }): UsageLimit {
   const limit = args.limit !== undefined && args.limit > 0 ? args.limit : undefined
   const usedFraction = limit !== undefined && args.used !== undefined ? args.used / limit : undefined
@@ -116,7 +119,12 @@ function buildLimit(args: {
   return {
     id: args.id,
     label: args.label,
-    scope: { provider: PROVIDER, windowId: window.id },
+    scope: {
+      provider: PROVIDER,
+      windowId: window.id,
+      ...(args.tier ? { tier: args.tier } : {}),
+      ...(args.accountId ? { accountId: args.accountId } : {}),
+    },
     window,
     amount: {
       ...(args.used !== undefined ? { used: args.used } : {}),
@@ -134,6 +142,10 @@ export function toUsageReport(raw: UsageLimitsResponse, fetchedAt: number): Usag
   const buckets = raw.usageBreakdownList?.length
     ? raw.usageBreakdownList
     : raw.usageBreakdown ? [raw.usageBreakdown] : []
+  const plan = raw.subscriptionInfo?.subscriptionTitle
+  const accountId = typeof raw.userInfo?.userId === "string" && raw.userInfo.userId.trim() !== ""
+    ? raw.userInfo.userId.trim()
+    : undefined
   const limits = buckets.flatMap((bucket, index) => {
     const id = bucket.resourceType || `usage-${index}`
     const unit = bucket.resourceType === "CREDIT" ? "credits" : "unknown"
@@ -146,6 +158,8 @@ export function toUsageReport(raw: UsageLimitsResponse, fetchedAt: number): Usag
       window: { id: "monthly", label: "Monthly", resetsAt: toEpochMs(bucket.nextDateReset ?? raw.nextDateReset) },
       unit,
       notes: overages && overages > 0 ? [`Overages: ${overages}`] : undefined,
+      tier: plan,
+      accountId,
     })]
     // Free-trial bonus credits expire on their own date instead of resetting monthly.
     const trial = bucket.freeTrialInfo
@@ -157,17 +171,22 @@ export function toUsageReport(raw: UsageLimitsResponse, fetchedAt: number): Usag
         limit: finite(trial.usageLimitWithPrecision ?? trial.usageLimit),
         window: { id: "bonus", label: "Bonus", resetsAt: toEpochMs(trial.freeTrialExpiry), resetLabel: "expires" },
         unit,
+        tier: plan,
+        accountId,
       }))
     }
     return result
   })
-  const plan = raw.subscriptionInfo?.subscriptionTitle
   return {
     provider: PROVIDER,
     fetchedAt,
     limits,
     ...(raw.overageConfiguration?.overageStatus === "ENABLED" ? { notes: ["Overages enabled"] } : {}),
-    metadata: { source: "kiro-management", ...(plan ? { planType: plan } : {}) },
+    metadata: {
+      source: "kiro-management",
+      ...(plan ? { planType: plan } : {}),
+      ...(accountId ? { accountId } : {}),
+    },
   }
 }
 
@@ -180,7 +199,7 @@ export function createKiroUsageProvider(options: KiroUsageOptions) {
 
   return {
     id: PROVIDER,
-    cacheVersion: 1,
+    cacheVersion: 2,
     supports: ({ provider, credential }: UsageFetchParams) => provider === PROVIDER && Boolean(accessOf(credential)),
     async fetchUsage({ credential }: UsageFetchParams): Promise<UsageReport | null> {
       const apiKey = accessOf(credential)

@@ -26,6 +26,7 @@ describe("Kiro usage provider", () => {
           && url.searchParams.get("resourceType") === "CREDIT") {
           return json({
             subscriptionInfo: { subscriptionTitle: "KIRO PRO" },
+            userInfo: { userId: "user-1" },
             usageBreakdownList: [{
               resourceType: "CREDIT",
               displayName: "Credits",
@@ -55,6 +56,11 @@ describe("Kiro usage provider", () => {
     assert.equal(monthly.window?.resetsAt, 1_800_000_000_000)
     assert.equal(bonus.status, "exhausted")
     assert.equal(bonus.window?.resetLabel, "expires")
+    // The plan keeps accounts on different plans in separate rows of OMP's usage dashboard,
+    // and the Kiro user id lets OMP count and de-duplicate accounts.
+    assert.equal(monthly.scope.tier, "KIRO PRO")
+    assert.equal(monthly.scope.accountId, "user-1")
+    assert.equal(report?.metadata?.accountId, "user-1")
   })
 
   it("uses the saved profile without listing profiles", async () => {
