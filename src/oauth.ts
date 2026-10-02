@@ -335,7 +335,12 @@ function fromFull(full: FullCredentials): { creds: OMPCredentials; meta: KiroAut
 // ---------------------------------------------------------------------------
 
 function tryAutoDetect(): { creds: OMPCredentials; meta: KiroAuthMeta } | null {
-  return tryReadCliCredentials() ?? tryReadIdeToken()
+  const cli = tryReadCliCredentials()
+  if (cli && cli.creds.expires > Date.now()) return cli
+  // An installed kiro-cli with an expired token must not hide a live IDE token.
+  const ide = tryReadIdeToken()
+  if (ide && ide.creds.expires > Date.now()) return ide
+  return cli ?? ide
 }
 
 // ---------------------------------------------------------------------------

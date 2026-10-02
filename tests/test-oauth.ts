@@ -249,6 +249,7 @@ describe("credentials reused from Kiro CLI", () => {
 
 describe("credentials reused from Kiro IDE", () => {
   const ssoDir = join(home, ".aws", "sso", "cache")
+  const hasSqlite = spawnSync("sqlite3", ["--version"]).status === 0
 
   it("defer to the live IDE token on refresh when no CLI is installed", async (t) => {
     mkdirSync(ssoDir, { recursive: true })
@@ -268,6 +269,51 @@ describe("credentials reused from Kiro IDE", () => {
     assert.equal(reused.access, "ide-access")
     assert.equal(reused.reused, true)
     assert.equal((await refreshToken(stored)).access, "renewed")
+  })
+
+  it("refresh with the credential's own metadata when the live IDE token has expired", async (t) => {
+    mkdirSync(ssoDir, { recursive: true })
+    t.after(() => rmSync(ssoDir, { recursive: true, force: true }))
+    writeFileSync(join(ssoDir, "kiro-auth-token.json"), JSON.stringify({
+      accessToken: "ide-access", refreshToken: "ide-refresh",
+      expiresAt: new Date(Date.now() - 3_600_000).toISOString(), region: "us-east-1",
+    }))
+    t.mock.method(globalThis, "fetch", async () =>
+      response({ accessToken: "renewed", refreshToken: "rotated", expiresIn: 3600 }))
+
+    const reused = await refreshToken({
+      access: "stale", refresh: "stale", expires: 0,
+      method: "social", region: "us-east-1", reused: true,
+    })
+    assert.equal(reused.access, "renewed")
+    assert.equal(reused.reused, true)
+  })
+
+  it("defer to the live IDE token when an installed kiro-cli holds an expired one", { skip: !hasSqlite }, async (t) => {
+    const cliDir = join(home, ".local", "share", "kiro-cli")
+    mkdirSync(cliDir, { recursive: true })
+    mkdirSync(ssoDir, { recursive: true })
+    t.after(() => {
+      rmSync(cliDir, { recursive: true, force: true })
+      rmSync(ssoDir, { recursive: true, force: true })
+    })
+    const expiredCliToken = JSON.stringify({
+      access_token: "cli-access", refresh_token: "cli-refresh",
+      expires_at: new Date(Date.now() - 3_600_000).toISOString(), region: "us-east-1",
+    })
+    execFileSync("sqlite3", [join(cliDir, "data.sqlite3"),
+      `CREATE TABLE auth_kv (key TEXT, value TEXT); CREATE TABLE state (key TEXT, value TEXT);`
+      + ` INSERT INTO auth_kv VALUES ('kirocli:odic:token', '${expiredCliToken}');`])
+    writeFileSync(join(ssoDir, "kiro-auth-token.json"), JSON.stringify({
+      accessToken: "ide-access", refreshToken: "ide-refresh",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(), region: "us-east-1",
+    }))
+
+    const reused = await refreshToken({
+      access: "stale", refresh: "stale", expires: 0,
+      method: "social", region: "us-east-1", reused: true,
+    })
+    assert.equal(reused.access, "ide-access")
   })
 })
 

@@ -212,6 +212,7 @@ async function requestManagement(
     if (!is2xx(response)) {
       // Error bodies are small; read them so callers can tell "not authorized" from "invalid token".
       const errorBody = await readBoundedJson(response, maxBodyBytes, controller.signal).catch(() => undefined)
+      await response.body?.cancel().catch(() => {})
       return { status: response.status, body: undefined, message: isRecord(errorBody) ? nonEmptyString(errorBody.message) : undefined }
     }
     return { status: response.status, body: await readBoundedJson(response, maxBodyBytes, controller.signal) }
