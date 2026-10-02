@@ -143,35 +143,61 @@ export async function resolveKiroProfileArn(
     if (override) return override
     if (options.profileArn?.trim()) return options.profileArn.trim()
   }
-  const { status, body: profile, message } = await requestManagement(
-    options.fetchImpl ?? fetch,
-    isApiKey
-      ? `${options.apiBase.replace(/\/+$/, "")}/`
-      : `${options.apiBase.replace(/\/+$/, "")}/List-Available-Profiles`,
-    apiKey,
-    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
-    isApiKey
-      ? { "Content-Type": "application/x-amz-json-1.0", "X-Amz-Target": "AmazonCodeWhispererService.GetProfile" }
-      : { "Content-Type": "application/json" },
-    options.signal,
-  )
-  // Builder ID tokens are not allowed to list profiles; they all share one public profile.
-  if (!isApiKey && status === 403 && message?.toLowerCase().includes("not authorized to access this feature")) {
-    return BUILDER_ID_PROFILE_ARN
-  }
-  if (!isRecord(profile)) return undefined
   if (isApiKey) {
-    return isRecord(profile.profile) ? nonEmptyString(profile.profile.arn) : undefined
+    const { body: profile } = await requestManagement(
+      options.fetchImpl ?? fetch,
+      `${options.apiBase.replace(/\/+$/, "")}/`,
+      apiKey,
+      options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
+      { "Content-Type": "application/x-amz-json-1.0", "X-Amz-Target": "AmazonCodeWhispererService.GetProfile" },
+      options.signal,
+    )
+    return isRecord(profile) && isRecord(profile.profile) ? nonEmptyString(profile.profile.arn) : undefined
   }
-  // Organization accounts may expose several profiles; the first one listed is used.
-  const profiles = Array.isArray(profile.profiles) ? profile.profiles : []
-  for (const entry of profiles) {
-    if (!isRecord(entry)) continue
-    const profileArn = nonEmptyString(entry.arn)
-    if (profileArn) return profileArn
+
+  // A profile can live in a canonical region other than the caller's, so every canonical region is
+  // probed before giving up. Only when all of them answer "not authorized" is the token a Builder ID
+  // one; a single region answering that way may just mean the profile is elsewhere.
+  let everyRegionNotAuthorized = true
+  for (const base of managementBases(options.apiBase)) {
+    const { status, body: profile, message } = await requestManagement(
+      options.fetchImpl ?? fetch,
+      `${base}/List-Available-Profiles`,
+      apiKey,
+      options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
+      { "Content-Type": "application/json" },
+      options.signal,
+    )
+    if (!(status === 403 && message?.toLowerCase().includes("not authorized to access this feature"))) {
+      everyRegionNotAuthorized = false
+    }
+    if (!isRecord(profile)) continue
+    // Organization accounts may expose several profiles; the first one listed is used.
+    const profiles = Array.isArray(profile.profiles) ? profile.profiles : []
+    for (const entry of profiles) {
+      if (!isRecord(entry)) continue
+      const profileArn = nonEmptyString(entry.arn)
+      if (profileArn) return profileArn
+    }
   }
-  return undefined
+  // Builder ID tokens are not allowed to list profiles; they all share one public profile.
+  return everyRegionNotAuthorized ? BUILDER_ID_PROFILE_ARN : undefined
+}
+
+const CANONICAL_MANAGEMENT_REGIONS = ["us-east-1", "eu-central-1"] as const
+
+// The caller's management base first, then the other canonical regions. A custom base that is not a
+// `management.<region>.kiro.dev` host is used as given and never rewritten.
+function managementBases(apiBase: string): string[] {
+  const primary = apiBase.replace(/\/+$/, "")
+  const match = /^(https:\/\/management\.)([a-z0-9-]+)(\.kiro\.dev)$/.exec(primary)
+  if (!match) return [primary]
+  const others = CANONICAL_MANAGEMENT_REGIONS
+    .filter((region) => region !== match[2])
+    .map((region) => `${match[1]}${region}${match[3]}`)
+  return [primary, ...others]
 }
 
 function copyOverlay(overlay: readonly OverlayModel[]): OverlayModel[] {
@@ -215,7 +241,9 @@ async function requestManagement(
       await response.body?.cancel().catch(() => {})
       return { status: response.status, body: undefined, message: isRecord(errorBody) ? nonEmptyString(errorBody.message) : undefined }
     }
-    return { status: response.status, body: await readBoundedJson(response, maxBodyBytes, controller.signal) }
+    const body = await readBoundedJson(response, maxBodyBytes, controller.signal)
+    await response.body?.cancel().catch(() => {})
+    return { status: response.status, body }
   } finally {
     clearTimeout(timer)
     outerSignal?.removeEventListener("abort", onOuterAbort)

@@ -515,6 +515,41 @@ describe("resolveKiroProfileArn", () => {
     assert.equal(arn, undefined)
   })
 
+  it("looks for the profile in the other canonical region before calling the token Builder ID", async () => {
+    const euArn = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/EUPROFILE"
+    const calls: string[] = []
+    const arn = await request((async (url: string) => {
+      calls.push(url)
+      return url.includes("eu-central-1")
+        ? jsonResponse(200, { profiles: [{ arn: euArn }] })
+        : jsonResponse(403, { message: "User is not authorized to access this feature." })
+    }) as unknown as typeof fetch)
+    assert.equal(arn, euArn)
+    assert.deepEqual(calls, [
+      "https://management.us-east-1.kiro.dev/List-Available-Profiles",
+      "https://management.eu-central-1.kiro.dev/List-Available-Profiles",
+    ])
+  })
+
+  it("does not call the token Builder ID when another region lists no profile either", async () => {
+    const arn = await request((async (url: string) =>
+      url.includes("eu-central-1")
+        ? jsonResponse(200, { profiles: [] })
+        : jsonResponse(403, { message: "User is not authorized to access this feature." })) as unknown as typeof fetch)
+    assert.equal(arn, undefined)
+  })
+
+  it("never rewrites a custom management base", async () => {
+    const calls: string[] = []
+    await resolveKiroProfileArn({
+      apiKey: "token-1",
+      apiBase: "https://proxy.example.com",
+      env: {},
+      fetchImpl: (async (url: string) => { calls.push(url); return jsonResponse(200, { profiles: [] }) }) as unknown as typeof fetch,
+    })
+    assert.deepEqual(calls, ["https://proxy.example.com/List-Available-Profiles"])
+  })
+
   it("prefers KIRO_PROFILE_ARN over any network lookup", async () => {
     let calls = 0
     const arn = await request((async () => { calls++; return jsonResponse(200, { profiles: [] }) }) as typeof fetch,

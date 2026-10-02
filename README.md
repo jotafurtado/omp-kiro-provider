@@ -118,8 +118,10 @@ profile ARN. `KIRO_API_BASE` overrides the inference base URL; it does not overr
 
 Profile resolution order for OAuth tokens: `KIRO_PROFILE_ARN`, the profile stored at login,
 `List-Available-Profiles` (first profile listed; set `KIRO_PROFILE_ARN` to pick another one in
-an organization with several). Builder ID tokens are not allowed to list profiles, so the
-provider uses the shared Builder ID profile when that call answers "not authorized".
+an organization with several). A profile can live in the other canonical region
+(`us-east-1` or `eu-central-1`), so both are queried, starting with `KIRO_REGION`. Builder ID
+tokens are not allowed to list profiles, so the provider uses the shared Builder ID profile only
+when every canonical region answers "not authorized".
 
 `models.json` is the capability overlay registered as OMP's static `models` catalog. It records context windows, max-token limits, reasoning flags, and text or image capability flags. Discovery requires auth. There is no public catalog. If you are unauthenticated or discovery fails, `fetchDynamicModels` returns an empty list so OMP does not cache a fake live catalog as an authoritative snapshot. The static `models.json` registration stays visible.
 
