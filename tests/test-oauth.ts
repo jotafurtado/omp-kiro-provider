@@ -1,8 +1,8 @@
 import assert from "node:assert/strict"
 import { execFileSync, spawnSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { after, describe, it } from "node:test"
 import type { AssistantMessageEvent, AssistantMessageLike, ContextLike, CoreDependencies, ModelLike, StreamOptions } from "../src/types.ts"
 import { chunked, content, eventStream, frame, frames, reasoning } from "./event-frames.ts"
@@ -14,7 +14,8 @@ const previousProfile = process.env.USERPROFILE
 process.env.HOME = home
 process.env.USERPROFILE = home
 const { login, refreshToken, getStoredProfileArn } = await import("../src/oauth.ts")
-const { buildKiroPayload, createStreamKiro } = await import("../src/core.ts")
+const { createStreamKiro } = await import("../src/core.ts")
+const { buildKiroPayload } = await import("../src/converters.ts")
 after(() => {
   if (previousHome === undefined) delete process.env.HOME
   else process.env.HOME = previousHome
@@ -122,7 +123,6 @@ describe("organization login", () => {
       }),
       now: () => Date.now(),
       env: { OMP_KIRO_STREAM_GATE: "0" },
-      calculateCost: () => {},
     })
     const output = await streamKiro({
       id: "claude-opus-5-5", name: "Claude Opus 5.5", api: "kiro-custom", provider: "kiro",
@@ -348,7 +348,6 @@ describe("cancelling while the profile is resolved", () => {
       }),
       now: () => Date.now(),
       env: { OMP_KIRO_STREAM_GATE: "0" },
-      calculateCost: () => {},
     })
     const output = await streamKiro({
       id: "claude-opus-5-5", name: "Claude Opus 5.5", api: "kiro-custom", provider: "kiro",
@@ -358,6 +357,10 @@ describe("cancelling while the profile is resolved", () => {
     assert.doesNotMatch(output.errorMessage ?? "", /No accessible Kiro profile/)
   })
 })
+
+// Server-side reasoning, as models.json marks it and index.ts passes it on.
+const HIDDEN_REASONING_MODEL: Partial<ModelLike> = { id: "claude-opus-4-7", reasoning: true }
+const HIDDEN_REASONING: Partial<CoreDependencies> = { hiddenReasoningModels: ["claude-opus-4-7"] }
 
 /**
  * Returns a function that streams one "Reply OK" turn through `fetchImpl` per call,
@@ -388,7 +391,6 @@ function kiroTurns(
     },
     now: () => Date.now(),
     env: { OMP_KIRO_STREAM_GATE: "0" },
-    calculateCost: () => {},
     ...deps,
   })
   return (apiKey, options = {}, context = { messages: [{ role: "user", content: "Reply OK" }] }) => streamKiro({
@@ -436,6 +438,24 @@ describe("profile region", () => {
     }) as typeof fetch, "eu-organization-token")
     assert.equal(output.stopReason, "stop", output.errorMessage)
     assert.deepEqual(inferenceHosts, ["runtime.eu-central-1.kiro.dev"])
+  })
+
+  it("uses the profile saved at login without listing profiles", async (t) => {
+    const metaPath = join(home, ".omp", "agent", "kiro-auth-meta.json")
+    const saved = existsSync(metaPath) ? readFileSync(metaPath, "utf-8") : undefined
+    t.after(() => saved === undefined ? rmSync(metaPath, { force: true }) : writeFileSync(metaPath, saved))
+    const storedArn = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/STORED"
+    mkdirSync(dirname(metaPath), { recursive: true })
+    writeFileSync(metaPath, JSON.stringify({ method: "social", profileArn: storedArn }))
+    const inference: { host: string; profileArn?: string }[] = []
+    const output = await streamOnce((async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === "/List-Available-Profiles") return response({ message: "Unexpected profile lookup" }, 500)
+      inference.push({ host: url.hostname, profileArn: JSON.parse(String(init?.body)).profileArn })
+      return eventStream(content("OK"))
+    }) as typeof fetch, "stored-profile-token")
+    assert.equal(output.stopReason, "stop", output.errorMessage)
+    assert.deepEqual(inference, [{ host: "runtime.eu-central-1.kiro.dev", profileArn: storedArn }])
   })
 })
 
@@ -520,7 +540,7 @@ describe("reasoning stream", () => {
 
   it("keeps the hidden-reasoning breadcrumb ahead of the answer across a retry", async () => {
     const { calls, fetchImpl } = kiro([frames(), content("OK")])
-    const output = await kiroTurns(fetchImpl, { id: "claude-opus-4-7", reasoning: true, reasoningHidden: true })(
+    const output = await kiroTurns(fetchImpl, HIDDEN_REASONING_MODEL, HIDDEN_REASONING)(
       "hidden-reasoning-token", { reasoning: "high" })
     assert.equal(output.stopReason, "stop", output.errorMessage)
     assert.equal(calls.inference, 2)
@@ -529,7 +549,7 @@ describe("reasoning stream", () => {
 
   it("shows reasoning a hidden-reasoning model streams in place of its breadcrumb", async () => {
     const { fetchImpl } = kiro([frames(reasoning("visible"), content("OK"))])
-    const output = await kiroTurns(fetchImpl, { id: "claude-opus-4-7", reasoning: true, reasoningHidden: true })(
+    const output = await kiroTurns(fetchImpl, HIDDEN_REASONING_MODEL, HIDDEN_REASONING)(
       "hidden-reasoning-text-token", { reasoning: "high" })
     assert.equal(output.stopReason, "stop", output.errorMessage)
     assert.deepEqual(output.content.map((block) => block.type), ["thinking", "text"])
@@ -546,7 +566,7 @@ describe("reasoning stream", () => {
       },
     })
     const { fetchImpl } = kiro([late])
-    const output = await kiroTurns(fetchImpl, { id: "claude-opus-4-7", reasoning: true, reasoningHidden: true })(
+    const output = await kiroTurns(fetchImpl, HIDDEN_REASONING_MODEL, HIDDEN_REASONING)(
       "late-reasoning-token", { reasoning: "high" })
     assert.equal(output.stopReason, "stop", output.errorMessage)
     assert.deepEqual(output.content.map((block) => block.type), ["thinking", "text"])
@@ -706,7 +726,7 @@ describe("stream errors", () => {
 
   it("keeps the hidden-reasoning breadcrumb when a retry discards the reasoning that took it over", async () => {
     const { calls, fetchImpl } = kiro([frames(reasoning("draft"), capacity), content("OK")])
-    const output = await kiroTurns(fetchImpl, { id: "claude-opus-4-7", reasoning: true, reasoningHidden: true })(
+    const output = await kiroTurns(fetchImpl, HIDDEN_REASONING_MODEL, HIDDEN_REASONING)(
       "breadcrumb-retry-token", { reasoning: "high" })
     assert.equal(output.stopReason, "stop", output.errorMessage)
     assert.equal(calls.inference, 2)
@@ -718,7 +738,7 @@ describe("stream errors", () => {
 
   it("keeps the hidden-reasoning breadcrumb when a retry discards the answer that closed it", async () => {
     const { calls, fetchImpl } = kiro([frames(content("Discarded"), capacity), content("OK")])
-    const output = await kiroTurns(fetchImpl, { id: "claude-opus-4-7", reasoning: true, reasoningHidden: true })(
+    const output = await kiroTurns(fetchImpl, HIDDEN_REASONING_MODEL, HIDDEN_REASONING)(
       "breadcrumb-close-retry-token", { reasoning: "high" })
     assert.equal(output.stopReason, "stop", output.errorMessage)
     assert.equal(calls.inference, 2)
@@ -733,7 +753,7 @@ describe("stream errors", () => {
       { ":message-type": "exception", ":exception-type": "ValidationException" })
     const { fetchImpl } = kiro([frames(content("Partial"), invalid)])
     const events: AssistantMessageEvent[] = []
-    const output = await kiroTurns(fetchImpl, { id: "claude-opus-4-7", reasoning: true, reasoningHidden: true }, {}, events)(
+    const output = await kiroTurns(fetchImpl, HIDDEN_REASONING_MODEL, HIDDEN_REASONING, events)(
       "breadcrumb-failure-token", { reasoning: "high" })
     assert.equal(output.stopReason, "error")
     assert.deepEqual(events.map((event) => event.type),
