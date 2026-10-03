@@ -16,6 +16,7 @@ describe("Kiro usage provider", () => {
     const provider = createKiroUsageProvider({
       managementBase: BASE,
       getProfileArn: () => undefined,
+      env: {},
       now: () => 1_000,
       fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input))
@@ -69,7 +70,7 @@ describe("Kiro usage provider", () => {
     assert.equal(paired?.limits[0].scope.accountId, "kiro")
   })
 
-  it("uses the saved profile without listing profiles and drops an expired trial", async () => {
+  it("uses the saved profile, reads a reset time in milliseconds, and drops an expired trial", async () => {
     const seen: string[] = []
     const provider = createKiroUsageProvider({
       managementBase: BASE,
@@ -78,7 +79,7 @@ describe("Kiro usage provider", () => {
       fetchImpl: (async (input: RequestInfo | URL) => {
         seen.push(new URL(String(input)).pathname)
         return json({ usageBreakdown: {
-          resourceType: "CREDIT", currentUsage: 95, usageLimit: 100,
+          resourceType: "CREDIT", currentUsage: 95, usageLimit: 100, nextDateReset: 1_800_000_000_000,
           freeTrialInfo: { currentUsage: 0, usageLimit: 500, freeTrialExpiry: 1 },
         } })
       }) as typeof fetch,
@@ -86,6 +87,7 @@ describe("Kiro usage provider", () => {
     const report = await provider.fetchUsage({ provider: "kiro", credential: { type: "oauth", accessToken: "t" } })
     assert.deepEqual(seen, ["/Get-Usage-Limits"])
     assert.deepEqual(report?.limits.map((limit) => [limit.id, limit.status]), [["kiro:CREDIT", "warning"]])
+    assert.equal(report?.limits[0].window?.resetsAt, 1_800_000_000_000)
   })
 
   it("sends an API key as one, to the region of its profile", async () => {
@@ -115,7 +117,7 @@ describe("Kiro usage provider", () => {
       getProfileArn: () => PROFILE_ARN,
       fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
         if (init?.signal?.aborted) throw init.signal.reason
-        return json({ usageBreakdownList: [] })
+        return json({ usageBreakdownList: [{ resourceType: "CREDIT", currentUsage: 1, usageLimit: 50 }] })
       }) as typeof fetch,
     })
     await assert.rejects(provider.fetchUsage({
@@ -125,16 +127,29 @@ describe("Kiro usage provider", () => {
     }))
   })
 
-  it("throws on an HTTP failure so OMP keeps the last good report", async () => {
+  it("throws on an HTTP failure or an empty answer so OMP keeps the last good report", async () => {
+    const answering = (response: Response) => createKiroUsageProvider({
+      managementBase: BASE,
+      getProfileArn: () => PROFILE_ARN,
+      fetchImpl: (async () => response) as typeof fetch,
+    })
+    const params = { provider: "kiro", credential: { type: "oauth" as const, accessToken: "t" } }
+    await assert.rejects(
+      answering(json({ message: "denied" }, 403)).fetchUsage(params),
+      /Get-Usage-Limits returned HTTP 403: denied/,
+    )
+    await assert.rejects(answering(json({ usageBreakdownList: [] })).fetchUsage(params), /no credit usage/)
+  })
+
+  it("gives a repeated resource type its own limit id", async () => {
+    const bucket = { resourceType: "CREDIT", currentUsage: 1, usageLimit: 50 }
     const provider = createKiroUsageProvider({
       managementBase: BASE,
       getProfileArn: () => PROFILE_ARN,
-      fetchImpl: (async () => json({ message: "denied" }, 403)) as typeof fetch,
+      fetchImpl: (async () => json({ usageBreakdownList: [bucket, bucket] })) as typeof fetch,
     })
-    await assert.rejects(
-      provider.fetchUsage({ provider: "kiro", credential: { type: "oauth", accessToken: "t" } }),
-      /Get-Usage-Limits returned HTTP 403: denied/,
-    )
+    const report = await provider.fetchUsage({ provider: "kiro", credential: { type: "oauth", accessToken: "t" } })
+    assert.deepEqual(report?.limits.map((limit) => limit.id), ["kiro:CREDIT", "kiro:usage-1"])
   })
 
   it("does not support other providers or missing credentials", () => {

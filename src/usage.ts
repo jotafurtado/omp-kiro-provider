@@ -82,12 +82,13 @@ export type KiroUsageOptions = {
   getProfileArn: () => string | undefined
   fetchImpl?: typeof fetch
   now?: () => number
+  env?: Record<string, string | undefined>
 }
 
-/** Kiro sends epoch seconds or ISO strings; OMP wants epoch milliseconds. */
+/** Kiro sends epoch seconds (milliseconds are accepted too) or ISO strings; OMP wants epoch milliseconds. */
 function toEpochMs(value: number | string | undefined): number | undefined {
   if (value === undefined || value === null) return undefined
-  const ms = typeof value === "number" ? value * 1000 : Date.parse(value)
+  const ms = typeof value === "number" ? (value < 1e12 ? value * 1000 : value) : Date.parse(value)
   return Number.isFinite(ms) ? ms : undefined
 }
 
@@ -138,13 +139,18 @@ function toUsageReport(raw: UsageLimitsResponse, fetchedAt: number, credentialAc
   const buckets = Array.isArray(raw.usageBreakdownList) && raw.usageBreakdownList.length
     ? raw.usageBreakdownList
     : raw.usageBreakdown ? [raw.usageBreakdown] : []
+  // An empty report would replace the last good one in OMP, so treat it as a failure.
+  if (!buckets.length) throw new Error("Get-Usage-Limits returned no credit usage")
   const plan = raw.subscriptionInfo?.subscriptionTitle
   // OMP pairs a report with its credential by account id, so the credential's id wins over Kiro's user id.
   const accountId = credentialAccountId?.trim()
     || (typeof raw.userInfo?.userId === "string" ? raw.userInfo.userId.trim() : "")
     || undefined
   const limits = buckets.flatMap((bucket, index) => {
-    const id = bucket.resourceType || `usage-${index}`
+    // OMP matches limits by id, so a repeated resource type falls back to the bucket's position.
+    const id = bucket.resourceType && buckets.findIndex((other) => other.resourceType === bucket.resourceType) === index
+      ? bucket.resourceType
+      : `usage-${index}`
     const unit = bucket.resourceType === "CREDIT" ? "credits" : "unknown"
     const overages = finite(bucket.currentOveragesWithPrecision ?? bucket.currentOverages)
     const result = [buildLimit({
@@ -204,6 +210,7 @@ export function createKiroUsageProvider(options: KiroUsageOptions) {
         apiBase: options.managementBase,
         fetchImpl,
         profileArn: options.getProfileArn(),
+        env: options.env,
         signal,
       })
       if (!profileArn) throw new Error("No accessible Kiro profile found for usage lookup")
