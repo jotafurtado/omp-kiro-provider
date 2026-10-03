@@ -70,6 +70,9 @@ printf '%s\n' 'KIRO_API_KEY=ksk_...' >> ~/.omp/agent/.env
 chmod 600 ~/.omp/agent/.env
 ```
 
+Requests made with an API key carry `TokenType: API_KEY`, as kiro-cli sends; without it Kiro
+rejects the key as an invalid bearer token.
+
 Do not commit `.env` files, API keys, exported OAuth tokens, browser callback payloads, or SQLite auth databases.
 
 ### OMP `/login`

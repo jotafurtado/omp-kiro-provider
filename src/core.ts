@@ -36,6 +36,7 @@ import { AwsEventStreamParser } from "./eventstream.ts"
 import { ThinkingTagParser } from "./thinking-parser.ts"
 import { parseBracketToolCalls } from "./bracket-tool-parser.ts"
 import { kiroBaseForRegion, kiroRegionFromProfileArn, resolveKiroProfileArn } from "./dynamic-models.ts"
+import { isKiroApiKey, kiroTokenTypeHeaders } from "./auth/token-type.ts"
 
 export * from "./converters.ts"
 export * from "./eventstream.ts"
@@ -176,11 +177,7 @@ function resyncCliToken(): string | undefined {
 // Build headers for Kiro API request
 // ---------------------------------------------------------------------------
 
-function buildKiroHeaders(
-  accessToken: string,
-  _isApiKey: boolean,
-  _isIdc: boolean,
-): Record<string, string> {
+export function buildKiroHeaders(accessToken: string): Record<string, string> {
   // Impersonate Kiro CLI (rust SDK) — matches mikeyobrien, hongyilyu, MasuRii
   const mid = randomUUID().replace(/-/g, "")
   const ua = `aws-sdk-rust/1.0.0 ua/2.1 os/other lang/rust api/codewhispererstreaming#1.28.3 m/E app/AmazonQ-For-CLI md/appVersion-1.28.3-${mid}`
@@ -195,6 +192,7 @@ function buildKiroHeaders(
     "x-amzn-kiro-agent-mode": "vibe",
     "amz-sdk-invocation-id": randomUUID(),
     "amz-sdk-request": "attempt=1; max=1",
+    ...kiroTokenTypeHeaders(accessToken),
   }
 }
 // ---------------------------------------------------------------------------
@@ -335,6 +333,8 @@ export function createStreamKiro(deps: CoreDependencies) {
 
       // Environment variable fallback
       if (!apiKey) apiKey = deps.env?.KIRO_API_KEY
+      // Discovery trims the key too; a stray space would hide the ksk_ prefix.
+      apiKey = apiKey?.trim()
 
 
 
@@ -370,10 +370,6 @@ export function createStreamKiro(deps: CoreDependencies) {
       const controller = new AbortController()
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
       let releaseKiroStreamGate: (() => void) | undefined
-
-      // Detect auth method for header selection
-      const isApiKey = apiKey.startsWith("ksk_")
-      const isIdc = !isApiKey
 
       // Read auth metadata to route profileArn correctly
       const metaRaw = (() => {
@@ -594,7 +590,7 @@ export function createStreamKiro(deps: CoreDependencies) {
             } catch (lookupError: unknown) {
               // A stale token fails here before inference could resync it, so resync now.
               // A rejected API key fails as itself instead of switching to the CLI identity.
-              if (options?.signal?.aborted || isApiKey
+              if (options?.signal?.aborted || isKiroApiKey(apiKey)
                 || !String(lookupError).includes("bearer token included in the request is invalid")) {
                 throw lookupError
               }
@@ -636,13 +632,14 @@ export function createStreamKiro(deps: CoreDependencies) {
         }
         const body = buildKiroPayload(model.id, contextForPayload, profileArn, undefined, model.contextWindow)
 
-        // Build headers — strip Authorization from user-supplied headers to prevent OAuth bypass
-        const userHeaders = { ...options?.headers }
-        delete userHeaders["Authorization"]
-        delete userHeaders["authorization"]
+        // Build headers — the credential headers come only from the credential, never from
+        // user-supplied headers, so neither the token nor its declared type can be overridden.
+        const userHeaders = Object.fromEntries(
+          Object.entries(options?.headers ?? {}).filter(([name]) => !/^(authorization|tokentype)$/i.test(name)),
+        )
 
         const reqHeaders: Record<string, string> = {
-          ...buildKiroHeaders(apiKey, isApiKey, isIdc),
+          ...buildKiroHeaders(apiKey),
           ...userHeaders,
         }
 
@@ -725,11 +722,14 @@ export function createStreamKiro(deps: CoreDependencies) {
               const peekBody = await response.clone().text().catch(() => "")
               if (peekBody.includes("TEMPORARILY_SUSPENDED")) break
               profileArnCache.delete(apiKey)
-              if (!isApiKey && !cliIdentityResynced && peekBody.includes("bearer token included in the request is invalid")) {
+              if (!isKiroApiKey(apiKey) && !cliIdentityResynced && peekBody.includes("bearer token included in the request is invalid")) {
                 const refreshedCliToken = resyncCliToken()
                 if (refreshedCliToken) {
                   apiKey = refreshedCliToken
                   reqHeaders.Authorization = `Bearer ${apiKey}`
+                  // The type declared for the previous credential must not carry over.
+                  delete reqHeaders.TokenType
+                  Object.assign(reqHeaders, kiroTokenTypeHeaders(apiKey))
                   cliIdentityResynced = true
                   continue
                 }

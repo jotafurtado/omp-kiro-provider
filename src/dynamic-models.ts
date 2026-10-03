@@ -1,3 +1,5 @@
+import { isKiroApiKey, kiroTokenTypeHeaders } from "./auth/token-type.ts"
+
 export type OverlayModel = {
   id: string
   name: string
@@ -137,7 +139,7 @@ export async function resolveKiroProfileArn(
 ): Promise<string | undefined> {
   const apiKey = options.apiKey?.trim() ?? ""
   if (!apiKey) return undefined
-  const isApiKey = apiKey.startsWith("ksk_")
+  const isApiKey = isKiroApiKey(apiKey)
   if (!isApiKey) {
     const override = nonEmptyString((options.env ?? process.env).KIRO_PROFILE_ARN)
     if (override) return override
@@ -269,6 +271,7 @@ async function requestManagement(
       headers: {
         Authorization: `Bearer ${apiKey}`,
         Accept: "application/json",
+        ...kiroTokenTypeHeaders(apiKey),
         ...postHeaders,
       },
       ...(postHeaders ? { body: "{}" } : {}),

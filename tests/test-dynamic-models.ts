@@ -278,6 +278,7 @@ describe("fetchDynamicKiroModels", () => {
       apiKey: "token-1",
       apiBase: API_BASE,
       overlay: OVERLAY,
+      env: {},
       fetchImpl,
     })
     const opus = models.find((model) => model.id === "claude-opus-5-5")
@@ -520,6 +521,7 @@ describe("fetchDynamicKiroModels", () => {
       apiBase: API_BASE,
       profileArn: euArn,
       overlay: OVERLAY,
+      env: {},
       fetchImpl: (async (url: string) => {
         urls.push(url)
         return jsonResponse(200, { models: [{ modelId: "claude-opus-5.5" }] })
@@ -527,6 +529,40 @@ describe("fetchDynamicKiroModels", () => {
     })
     assert.ok(models.some((model) => model.id === "claude-opus-5-5"))
     assert.equal(new URL(urls[0]).origin, "https://management.eu-central-1.kiro.dev")
+  })
+
+  it("declares API keys with TokenType: API_KEY on every management request", async () => {
+    const seen: Array<string | undefined> = []
+    const models = await fetchDynamicKiroModels({
+      apiKey: "ksk_example_api_key",
+      apiBase: API_BASE,
+      overlay: OVERLAY,
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        seen.push(header(init, "TokenType"))
+        return new URL(String(input)).pathname === "/"
+          ? jsonResponse(200, { profile: { arn: PROFILE_ARN } })
+          : jsonResponse(200, { models: [{ modelId: "claude-opus-5.5" }] })
+      }) as typeof fetch,
+    })
+    assert.ok(models.some((model) => model.id === "claude-opus-5-5"))
+    assert.deepEqual(seen, ["API_KEY", "API_KEY"])
+  })
+
+  it("omits TokenType for OAuth credentials", async () => {
+    const seen: Array<string | undefined> = []
+    await fetchDynamicKiroModels({
+      apiKey: "aoa_example_oauth_token",
+      apiBase: API_BASE,
+      overlay: OVERLAY,
+      env: {},
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        seen.push(header(init, "TokenType"))
+        return new URL(String(input)).pathname === "/List-Available-Profiles"
+          ? jsonResponse(200, { profiles: [{ arn: PROFILE_ARN }] })
+          : jsonResponse(200, { models: [{ modelId: "claude-opus-5.5" }] })
+      }) as typeof fetch,
+    })
+    assert.deepEqual(seen, [undefined, undefined])
   })
 
   it("does not publish a live catalog when the account has no accessible profile", async () => {

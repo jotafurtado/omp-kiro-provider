@@ -367,7 +367,9 @@ describe("cancelling while the profile is resolved", () => {
 })
 
 /** Returns a function that streams one "Reply OK" turn through `fetchImpl` per call. */
-function kiroTurns(fetchImpl: typeof fetch): (apiKey: string) => Promise<AssistantMessageLike> {
+function kiroTurns(
+  fetchImpl: typeof fetch,
+): (apiKey: string, headers?: Record<string, string>) => Promise<AssistantMessageLike> {
   const streamKiro = createStreamKiro({
     apiBase: "https://runtime.us-east-1.kiro.dev",
     fetchImpl,
@@ -394,15 +396,19 @@ function kiroTurns(fetchImpl: typeof fetch): (apiKey: string) => Promise<Assista
     homeDir: home,
     calculateCost: () => {},
   })
-  return (apiKey) => streamKiro({
+  return (apiKey, headers) => streamKiro({
     id: "claude-opus-5-5", name: "Claude Opus 5.5", api: "kiro-custom", provider: "kiro",
     reasoning: false, input: ["text"], contextWindow: 1_000_000, maxTokens: 128_000,
-  }, { messages: [{ role: "user", content: "Reply OK" }] }, { apiKey }).result()
+  }, { messages: [{ role: "user", content: "Reply OK" }] }, { apiKey, headers }).result()
 }
 
 /** Streams one "Reply OK" turn through `fetchImpl` and returns the final message. */
-function streamOnce(fetchImpl: typeof fetch, apiKey: string): Promise<AssistantMessageLike> {
-  return kiroTurns(fetchImpl)(apiKey)
+function streamOnce(
+  fetchImpl: typeof fetch,
+  apiKey: string,
+  headers?: Record<string, string>,
+): Promise<AssistantMessageLike> {
+  return kiroTurns(fetchImpl)(apiKey, headers)
 }
 
 describe("profile region", () => {
@@ -421,6 +427,55 @@ describe("profile region", () => {
     }) as typeof fetch, "eu-organization-token")
     assert.equal(output.stopReason, "stop", output.errorMessage)
     assert.deepEqual(inferenceHosts, ["runtime.eu-central-1.kiro.dev"])
+  })
+})
+
+describe("credential type header", () => {
+  it("declares an API key on inference and sends the key's own profile", async () => {
+    const keyArn = "arn:aws:codewhisperer:us-east-1:987654321098:profile/api-key"
+    let inference: { tokenType: string | null; profileArn?: string } | undefined
+    const output = await streamOnce((async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      const headers = new Headers(init?.headers)
+      if (url.hostname === "management.us-east-1.kiro.dev") {
+        return headers.get("TokenType") === "API_KEY"
+          ? response({ profile: { arn: keyArn } })
+          : response({ message: "The bearer token included in the request is invalid." }, 403)
+      }
+      inference = { tokenType: headers.get("TokenType"), profileArn: JSON.parse(String(init?.body)).profileArn }
+      return new Response('{"content":"OK"}')
+    }) as typeof fetch, "ksk_example_api_key")
+    assert.equal(output.stopReason, "stop", output.errorMessage)
+    assert.deepEqual(inference, { tokenType: "API_KEY", profileArn: keyArn })
+  })
+
+  it("recognizes an API key that arrives with surrounding whitespace", async () => {
+    let inference: { authorization: string | null; tokenType: string | null } | undefined
+    const output = await streamOnce((async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers)
+      if (new URL(String(input)).hostname === "management.us-east-1.kiro.dev") {
+        return response({ profile: { arn: "arn:aws:codewhisperer:us-east-1:987654321098:profile/api-key" } })
+      }
+      inference = { authorization: headers.get("Authorization"), tokenType: headers.get("TokenType") }
+      return new Response('{"content":"OK"}')
+    }) as typeof fetch, " ksk_example_api_key\n")
+    assert.equal(output.stopReason, "stop", output.errorMessage)
+    assert.deepEqual(inference, { authorization: "Bearer ksk_example_api_key", tokenType: "API_KEY" })
+  })
+
+  it("never lets a request header declare an OAuth token as an API key", async () => {
+    let tokenTypes: Array<string | null> = []
+    const output = await streamOnce((async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === "/List-Available-Profiles") {
+        return response({ profiles: [{ arn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/default" }] })
+      }
+      const headers = new Headers(init?.headers)
+      tokenTypes = [headers.get("TokenType")]
+      return new Response('{"content":"OK"}')
+    }) as typeof fetch, "header-oauth-token", { tokentype: "API_KEY", Authorization: "Bearer other" })
+    assert.equal(output.stopReason, "stop", output.errorMessage)
+    assert.deepEqual(tokenTypes, [null])
   })
 })
 
