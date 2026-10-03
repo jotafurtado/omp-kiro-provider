@@ -43,7 +43,7 @@ extensions:
 Restart `omp`, then verify that Kiro models are visible:
 
 ```sh
-omp --list-models kiro
+omp models kiro
 ```
 
 To update:
@@ -106,7 +106,7 @@ omp --model kiro/auto
 omp -p --model kiro/auto "Reply briefly."
 ```
 
-Any model id from `omp --list-models kiro` can take the place of `auto`. Do not use `--provider kiro`; OMP resolves extension-defined providers through qualified `--model kiro/<model-id>` selectors.
+Any model id from `omp models kiro` can take the place of `auto`. Do not use `--provider kiro`; OMP resolves extension-defined providers through qualified `--model kiro/<model-id>` selectors.
 
 Only one Kiro response streams at a time across every `omp` session on the machine; other
 sessions and subagents wait their turn, because parallel streams on one account draw throttling.
@@ -143,24 +143,25 @@ tokens are not allowed to list profiles, so the provider uses the shared Builder
 when every canonical region answers "not authorized". If a region fails instead, the request
 reports that error and the lookup is retried on the next request.
 
-The live catalog is authoritative: OMP lists exactly the models it returns. Names, token limits,
+For each model the catalog returns, its name, token limits,
 and reasoning support come from the catalog (reasoning from the `thinking` or effort fields of a
 model's request schema). `models.json` fills in what the catalog leaves out and marks models whose
 reasoning stays server-side. Every Claude model accepts images; other models do when the catalog
 or `models.json` says so. A model in neither gets text-only input and conservative token defaults.
 
-`models.json` is also OMP's static `models` catalog, used before the first discovery and whenever
-it fails. Discovery requires auth; there is no public catalog. When you are signed out or discovery
+`models.json` is also OMP's static `models` catalog, so its models are listed before the first
+discovery and when discovery fails. Discovery requires auth; there is no public catalog. When you are signed out or discovery
 fails, `fetchDynamicModels` fails rather than returning an empty list, because OMP would take an
 empty list as the account's whole catalog and drop every model discovered so far. OMP then keeps
 its cached catalog or `models.json`.
 
 The provider does not write `models.json` at runtime. There is no weekly updater.
 
-Once discovery has run, `omp --list-models kiro` shows the models your account can use; until then
-it shows the `models.json` fallback, which may include models your account lacks. New Kiro models
-appear in the discovered list, and retired ones disappear, with no change to `models.json`. Edit it only to correct metadata
-the catalog gets wrong or leaves out, in a reviewable PR, and run the test suite before merging.
+`omp models kiro` and the `/model` picker list the `models.json` models together with the
+discovered ones (OMP 18.4.2 and 18.5.0), so they can include models your account cannot use. A new
+Kiro model appears once discovery has run, with no change to `models.json`; a retired one stays
+listed only while `models.json` still has it. Edit `models.json` only to correct metadata the
+catalog gets wrong or leaves out, in a reviewable PR, and run the test suite before merging.
 
 Kiro often sends a model's id as its name. For a Claude or GPT model missing from `models.json`,
 the provider then derives a readable name from the id: `claude-opus-5.5` is shown as
