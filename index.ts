@@ -27,7 +27,7 @@ import { calculateCost, createAssistantMessageEventStream } from "./src/runtime.
 // ---------------------------------------------------------------------------
 
 const DEFAULT_REGION = "us-east-1"
-const region = process.env.KIRO_REGION ?? DEFAULT_REGION
+const region = process.env.KIRO_REGION?.trim().toLowerCase() || DEFAULT_REGION
 const DEFAULT_API_BASE = `https://runtime.${region}.kiro.dev`
 const API_BASE = process.env.KIRO_API_BASE ?? DEFAULT_API_BASE
 const MANAGEMENT_BASE = `https://management.${region}.kiro.dev`

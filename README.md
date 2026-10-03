@@ -110,18 +110,22 @@ Do not use `--provider kiro`; OMP resolves extension-defined providers through q
 With a Kiro OAuth or API credential, the provider resolves the account profile and calls
 `GET https://management.{region}.kiro.dev/List-Available-Models?origin=KIRO_CLI&profileArn=...`.
 OAuth sessions use the saved profile ARN or `POST /List-Available-Profiles`; API keys resolve
-their own profile through the `AmazonCodeWhispererService.GetProfile` RPC, without reusing
-a saved OAuth profile. `KIRO_REGION` selects the API region and defaults to `us-east-1`.
+their own profile through the `AmazonCodeWhispererService.GetProfile` RPC in `us-east-1`, where
+Kiro issues API keys, without reusing a saved OAuth profile. `KIRO_REGION` selects the API region
+and defaults to `us-east-1`.
 
 Inference uses `https://runtime.{region}.kiro.dev/generateAssistantResponse` with the resolved
-profile ARN. `KIRO_API_BASE` overrides the inference base URL; it does not override model discovery.
+profile ARN. A profile belongs to one region, so model discovery and inference go to the region in
+the profile ARN. `KIRO_API_BASE` overrides the inference base URL; a non-`kiro.dev` override is used
+as given, and it does not override model discovery.
 
 Profile resolution order for OAuth tokens: `KIRO_PROFILE_ARN`, the profile stored at login,
 `List-Available-Profiles` (first profile listed; set `KIRO_PROFILE_ARN` to pick another one in
 an organization with several). A profile can live in the other canonical region
 (`us-east-1` or `eu-central-1`), so both are queried, starting with `KIRO_REGION`. Builder ID
 tokens are not allowed to list profiles, so the provider uses the shared Builder ID profile only
-when every canonical region answers "not authorized".
+when every canonical region answers "not authorized". If a region fails instead, the request
+reports that error and the lookup is retried on the next request.
 
 `models.json` is the capability overlay registered as OMP's static `models` catalog. It records context windows, max-token limits, reasoning flags, and text or image capability flags. Discovery requires auth. There is no public catalog. If you are unauthenticated or discovery fails, `fetchDynamicModels` returns an empty list so OMP does not cache a fake live catalog as an authoritative snapshot. The static `models.json` registration stays visible.
 

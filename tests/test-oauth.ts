@@ -365,3 +365,54 @@ describe("cancelling while the profile is resolved", () => {
     assert.doesNotMatch(output.errorMessage ?? "", /No accessible Kiro profile/)
   })
 })
+
+/** Streams one "Reply OK" turn through `fetchImpl` and returns the final message. */
+async function streamOnce(fetchImpl: typeof fetch, apiKey: string): Promise<AssistantMessageLike> {
+  let finish: (message: AssistantMessageLike) => void = () => { throw new Error("Result not initialized") }
+  const result = new Promise<AssistantMessageLike>((resolve) => { finish = resolve })
+  const events: AssistantMessageEvent[] = []
+  const streamKiro = createStreamKiro({
+    apiBase: "https://runtime.us-east-1.kiro.dev",
+    fetchImpl,
+    createStream: () => ({
+      push(event) {
+        events.push(event)
+        if (event.type === "done") finish(event.message)
+        if (event.type === "error") finish(event.error)
+      },
+      end(message) { if (message) finish(message) },
+      result: () => result,
+      async *[Symbol.asyncIterator]() { yield* events },
+    }),
+    cwd: () => home,
+    now: () => Date.now(),
+    uuid: () => "test-conversation",
+    env: { OMP_KIRO_STREAM_GATE: "0" },
+    authPaths: [],
+    homeDir: home,
+    calculateCost: () => {},
+  })
+  return streamKiro({
+    id: "claude-opus-5-5", name: "Claude Opus 5.5", api: "kiro-custom", provider: "kiro",
+    reasoning: false, input: ["text"], contextWindow: 1_000_000, maxTokens: 128_000,
+  }, { messages: [{ role: "user", content: "Reply OK" }] }, { apiKey }).result()
+}
+
+describe("profile region", () => {
+  it("sends inference to the region that owns the profile", async () => {
+    const euArn = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/EUPROFILE"
+    const inferenceHosts: string[] = []
+    const output = await streamOnce((async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === "/List-Available-Profiles") {
+        return url.hostname === "management.eu-central-1.kiro.dev"
+          ? response({ profiles: [{ arn: euArn }] })
+          : response({ message: "User is not authorized to access this feature." }, 403)
+      }
+      inferenceHosts.push(url.hostname)
+      return new Response('{"content":"OK"}')
+    }) as typeof fetch, "eu-organization-token")
+    assert.equal(output.stopReason, "stop", output.errorMessage)
+    assert.deepEqual(inferenceHosts, ["runtime.eu-central-1.kiro.dev"])
+  })
+})

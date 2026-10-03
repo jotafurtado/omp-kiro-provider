@@ -120,7 +120,7 @@ export async function fetchDynamicKiroModels(
     if (!profileArn) return []
     const { body: payload } = await requestManagement(
       fetchImpl,
-      buildListAvailableModelsUrl(options.apiBase, profileArn),
+      buildListAvailableModelsUrl(kiroBaseForRegion(options.apiBase, kiroRegionFromProfileArn(profileArn)), profileArn),
       apiKey,
       timeoutMs,
       maxBodyBytes,
@@ -146,7 +146,7 @@ export async function resolveKiroProfileArn(
   if (isApiKey) {
     const { body: profile } = await requestManagement(
       options.fetchImpl ?? fetch,
-      `${options.apiBase.replace(/\/+$/, "")}/`,
+      `${kiroBaseForRegion(options.apiBase, API_KEY_REGION)}/`,
       apiKey,
       options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
@@ -158,20 +158,35 @@ export async function resolveKiroProfileArn(
 
   // A profile can live in a canonical region other than the caller's, so every canonical region is
   // probed before giving up. Only when all of them answer "not authorized" is the token a Builder ID
-  // one; a single region answering that way may just mean the profile is elsewhere.
+  // one; a single region answering that way may just mean the profile is elsewhere. A region that
+  // fails or answers with another error does not end the probe, but its error is reported when no
+  // region yields a profile, rather than guessing the Builder ID profile.
   let everyRegionNotAuthorized = true
+  let probeError: unknown
   for (const base of managementBases(options.apiBase)) {
-    const { status, body: profile, message } = await requestManagement(
-      options.fetchImpl ?? fetch,
-      `${base}/List-Available-Profiles`,
-      apiKey,
-      options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
-      { "Content-Type": "application/json" },
-      options.signal,
-    )
-    if (!(status === 403 && message?.toLowerCase().includes("not authorized to access this feature"))) {
+    let response: ManagementResponse
+    try {
+      response = await requestManagement(
+        options.fetchImpl ?? fetch,
+        `${base}/List-Available-Profiles`,
+        apiKey,
+        options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
+        { "Content-Type": "application/json" },
+        options.signal,
+      )
+    } catch (error) {
+      if (options.signal?.aborted) throw error
       everyRegionNotAuthorized = false
+      probeError = error
+      continue
+    }
+    const { status, body: profile, message } = response
+    if (status === 403 && message?.toLowerCase().includes("not authorized to access this feature")) continue
+    everyRegionNotAuthorized = false
+    if (status < 200 || status >= 300) {
+      probeError = new Error(`List-Available-Profiles returned HTTP ${status}${message ? `: ${message}` : ""}`)
+      continue
     }
     if (!isRecord(profile)) continue
     // Organization accounts may expose several profiles; the first one listed is used.
@@ -183,19 +198,41 @@ export async function resolveKiroProfileArn(
     }
   }
   // Builder ID tokens are not allowed to list profiles; they all share one public profile.
-  return everyRegionNotAuthorized ? BUILDER_ID_PROFILE_ARN : undefined
+  if (everyRegionNotAuthorized) return BUILDER_ID_PROFILE_ARN
+  if (probeError) throw probeError
+  return undefined
 }
 
 const CANONICAL_MANAGEMENT_REGIONS = ["us-east-1", "eu-central-1"] as const
+/** Kiro issues API keys against the us-east-1 control plane, so their profile is resolved there. */
+const API_KEY_REGION = "us-east-1"
+const KIRO_HOST = /^(https:\/\/(?:management|runtime)\.)([a-z0-9-]+)(\.kiro\.dev)$/i
+
+/** The region a profile ARN (`arn:aws:codewhisperer:<region>:...`) belongs to. */
+export function kiroRegionFromProfileArn(profileArn: string | undefined): string | undefined {
+  const region = profileArn?.split(":")[3]?.toLowerCase()
+  return region && /^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(region) ? region : undefined
+}
+
+/**
+ * A profile belongs to one region, and model discovery and inference must go to that region, so a
+ * `management.<region>.kiro.dev` or `runtime.<region>.kiro.dev` base follows it. Any other base is
+ * used as given.
+ */
+export function kiroBaseForRegion(base: string, region: string | undefined): string {
+  const trimmed = base.replace(/\/+$/, "")
+  const match = region ? KIRO_HOST.exec(trimmed) : null
+  return match ? `${match[1]}${region}${match[3]}` : trimmed
+}
 
 // The caller's management base first, then the other canonical regions. A custom base that is not a
 // `management.<region>.kiro.dev` host is used as given and never rewritten.
 function managementBases(apiBase: string): string[] {
   const primary = apiBase.replace(/\/+$/, "")
-  const match = /^(https:\/\/management\.)([a-z0-9-]+)(\.kiro\.dev)$/.exec(primary)
+  const match = /^(https:\/\/management\.)([a-z0-9-]+)(\.kiro\.dev)$/i.exec(primary)
   if (!match) return [primary]
   const others = CANONICAL_MANAGEMENT_REGIONS
-    .filter((region) => region !== match[2])
+    .filter((region) => region !== match[2].toLowerCase())
     .map((region) => `${match[1]}${region}${match[3]}`)
   return [primary, ...others]
 }

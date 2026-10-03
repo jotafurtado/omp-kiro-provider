@@ -35,7 +35,7 @@ import { buildKiroPayload, resolveToolName } from "./converters.ts"
 import { AwsEventStreamParser } from "./eventstream.ts"
 import { ThinkingTagParser } from "./thinking-parser.ts"
 import { parseBracketToolCalls } from "./bracket-tool-parser.ts"
-import { resolveKiroProfileArn } from "./dynamic-models.ts"
+import { kiroBaseForRegion, kiroRegionFromProfileArn, resolveKiroProfileArn } from "./dynamic-models.ts"
 
 export * from "./converters.ts"
 export * from "./eventstream.ts"
@@ -598,6 +598,8 @@ export function createStreamKiro(deps: CoreDependencies) {
           if (!profileArn) throw new Error("No accessible Kiro profile found for this account.")
           profileArnCache.set(apiKey, profileArn)
         }
+        // The runtime rejects a profile from another region, so inference follows the profile.
+        const runtimeBase = kiroBaseForRegion(apiBase, kiroRegionFromProfileArn(profileArn))
 
         // --- Thinking / reasoning mode ---
         // Inject <thinking_mode> into system prompt so the model produces <thinking> tags.
@@ -693,7 +695,7 @@ export function createStreamKiro(deps: CoreDependencies) {
               : timeoutController.signal
             try {
               response = await raceAbort(
-                fetchImpl(`${apiBase}/generateAssistantResponse`, {
+                fetchImpl(`${runtimeBase}/generateAssistantResponse`, {
                   method: "POST",
                   headers: reqHeaders,
                   body: JSON.stringify(body),

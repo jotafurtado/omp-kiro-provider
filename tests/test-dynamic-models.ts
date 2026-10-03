@@ -487,6 +487,37 @@ describe("fetchDynamicKiroModels", () => {
     assert.ok(models.some((model) => model.id === "claude-opus-5-5"))
   })
 
+  it("resolves an API key's profile in us-east-1 whatever the configured region", async () => {
+    const urls: string[] = []
+    await resolveKiroProfileArn({
+      apiKey: "ksk_test",
+      apiBase: "https://management.eu-central-1.kiro.dev",
+      env: {},
+      fetchImpl: (async (url: string) => {
+        urls.push(url)
+        return jsonResponse(200, { profile: { arn: PROFILE_ARN } })
+      }) as unknown as typeof fetch,
+    })
+    assert.deepEqual(urls, ["https://management.us-east-1.kiro.dev/"])
+  })
+
+  it("lists models in the region that owns the profile", async () => {
+    const euArn = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/EUPROFILE"
+    const urls: string[] = []
+    const models = await fetchDynamicKiroModels({
+      apiKey: "token-1",
+      apiBase: API_BASE,
+      profileArn: euArn,
+      overlay: OVERLAY,
+      fetchImpl: (async (url: string) => {
+        urls.push(url)
+        return jsonResponse(200, { models: [{ modelId: "claude-opus-5.5" }] })
+      }) as unknown as typeof fetch,
+    })
+    assert.ok(models.some((model) => model.id === "claude-opus-5-5"))
+    assert.equal(new URL(urls[0]).origin, "https://management.eu-central-1.kiro.dev")
+  })
+
   it("does not publish a live catalog when the account has no accessible profile", async () => {
     for (const payload of [{ profiles: [] }, { profiles: [{}] }, { message: "forbidden" }]) {
       const models = await fetchDynamicKiroModels({
@@ -511,8 +542,29 @@ describe("resolveKiroProfileArn", () => {
   })
 
   it("does not mistake an invalid token for a Builder ID token", async () => {
-    const arn = await request((async () => jsonResponse(403, { message: "Invalid token" })) as typeof fetch)
-    assert.equal(arn, undefined)
+    await assert.rejects(
+      request((async () => jsonResponse(403, { message: "Invalid token" })) as typeof fetch),
+      /HTTP 403: Invalid token/,
+    )
+  })
+
+  it("reports a failed region instead of guessing the Builder ID profile", async () => {
+    await assert.rejects(
+      request((async (url: string) =>
+        url.includes("eu-central-1")
+          ? jsonResponse(503, { message: "Service unavailable" })
+          : jsonResponse(403, { message: "User is not authorized to access this feature." })) as unknown as typeof fetch),
+      /HTTP 503/,
+    )
+  })
+
+  it("keeps probing when a region cannot be reached", async () => {
+    const euArn = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/EUPROFILE"
+    const arn = await request((async (url: string) => {
+      if (!url.includes("eu-central-1")) throw new TypeError("fetch failed")
+      return jsonResponse(200, { profiles: [{ arn: euArn }] })
+    }) as unknown as typeof fetch)
+    assert.equal(arn, euArn)
   })
 
   it("looks for the profile in the other canonical region before calling the token Builder ID", async () => {
