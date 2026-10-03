@@ -22,7 +22,7 @@ Changes to these areas need careful review:
 - OAuth/OIDC device-code flow
 - token refresh logic
 - Kiro CLI / AWS SSO session reuse
-- stream request headers
+- request headers, including the management requests for models and usage
 - retry and timeout behavior
 - tool-call conversion
 - prompt/log redaction
