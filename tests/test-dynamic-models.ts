@@ -195,6 +195,46 @@ describe("parseLiveModels", () => {
 })
 
 describe("mergeLiveWithOverlay", () => {
+  it("formats technical Claude and GPT names without changing model ids", () => {
+    const live = parseLiveModels({ models: [
+      { modelId: "claude-opus-5.5", modelName: "claude-opus-5.5" },
+      { modelId: "claude-sonnet-5-5" },
+      { modelId: "claude-opus-5" },
+      { modelId: "claude-haiku-6.1-1m" },
+      { modelId: "gpt-6.1-sol", modelName: "gpt-6.1-sol" },
+      { modelId: "gpt-6-1" },
+      { modelId: "gpt-6-astra" },
+    ] })
+    assert.ok(live)
+    assert.deepEqual(mergeLiveWithOverlay([], live).map(({ id, name }) => ({ id, name })), [
+      { id: "claude-opus-5-5", name: "Claude Opus 5.5" },
+      { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5" },
+      { id: "claude-opus-5", name: "Claude Opus 5" },
+      { id: "claude-haiku-6-1-1m", name: "Claude Haiku 6.1 (1M)" },
+      { id: "gpt-6-1-sol", name: "GPT-6.1 Sol" },
+      { id: "gpt-6-1", name: "GPT-6.1" },
+      { id: "gpt-6-astra", name: "GPT-6 Astra" },
+    ])
+  })
+
+  it("preserves supplied display names and unrecognized technical names", () => {
+    const merged = mergeLiveWithOverlay([], [
+      { id: "claude-opus-5-5", name: "Claude Opus 5.5 Preview" },
+      { id: "gpt-6-1-sol", name: "Custom GPT" },
+      { id: "future-model-7", name: "future-model-7" },
+      { id: "claude-opus-5-5-preview", name: "claude-opus-5.5-preview" },
+      { id: "claude-sonnet-4-20250514", name: "claude-sonnet-4-20250514" },
+    ])
+    assert.deepEqual(merged.map((model) => model.name), [
+      "Claude Opus 5.5 Preview", "Custom GPT", "future-model-7", "claude-opus-5.5-preview", "claude-sonnet-4-20250514",
+    ])
+  })
+
+  it("prefers the reviewed overlay name over a technical live name", () => {
+    const [sonnet] = mergeLiveWithOverlay(OVERLAY, [{ id: "claude-sonnet-5", name: "claude-sonnet-5" }])
+    assert.equal(sonnet.name, "Claude Sonnet 5")
+  })
+
   it("lists only live models, preferring live metadata and filling gaps from the overlay", () => {
     const merged = mergeLiveWithOverlay(OVERLAY, [
       { id: "claude-sonnet-5", name: "Live Sonnet Name", reasoning: false, contextWindow: 200_000, maxTokens: 64_000 },

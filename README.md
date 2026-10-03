@@ -148,6 +148,11 @@ its cached catalog or `models.json`.
 
 The provider does not write `models.json` at runtime. There is no weekly updater.
 
+New live Claude Opus/Sonnet/Haiku and GPT models use readable display names when Kiro returns
+only a technical identifier, for example `claude-opus-5.5` becomes `Claude Opus 5.5`.
+Model ids and selectors remain unchanged. Supplied display names and unrecognized identifiers
+are preserved. Run `omp models refresh kiro` and restart OMP to refresh cached names.
+
 The registry currently includes selectors such as:
 
 - `kiro/auto`

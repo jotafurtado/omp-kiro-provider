@@ -99,7 +99,7 @@ export function mergeLiveWithOverlay(
     const image = item.input?.includes("image") || known?.input.includes("image") || item.id.startsWith("claude-")
     return {
       id: item.id,
-      name: item.name ?? known?.name ?? item.id,
+      name: friendlyLiveModelName(item, known?.name),
       reasoning: item.reasoning ?? known?.reasoning ?? false,
       ...(known?.reasoningHidden ? { reasoningHidden: true } : {}),
       input: image ? ["text", "image"] : ["text"],
@@ -108,6 +108,31 @@ export function mergeLiveWithOverlay(
       cost: { ...ZERO_COST },
     }
   })
+}
+
+/**
+ * Kiro often returns its technical id as the model name (`claude-opus-5.5`). A real display
+ * name from the catalog wins, then the reviewed models.json name, then one derived from a known
+ * Claude or GPT id pattern. Anything else keeps the name or id Kiro sent.
+ */
+function friendlyLiveModelName(model: LiveModel, knownName?: string): string {
+  if (model.name && toOverlayModelId(model.name) !== model.id) return model.name
+  if (knownName) return knownName
+
+  const claude = /^claude-(opus|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?(-1m)?$/.exec(model.id)
+  if (claude) {
+    const family = claude[1][0].toUpperCase() + claude[1].slice(1)
+    const version = claude[2] + (claude[3] ? `.${claude[3]}` : "")
+    return `Claude ${family} ${version}${claude[4] ? " (1M)" : ""}`
+  }
+
+  const gpt = /^gpt-(\d+)(?:-(\d{1,2}))?(?:-([a-z]+))?$/.exec(model.id)
+  if (gpt) {
+    const version = gpt[1] + (gpt[2] ? `.${gpt[2]}` : "")
+    const variant = gpt[3] ? ` ${gpt[3][0].toUpperCase()}${gpt[3].slice(1)}` : ""
+    return `GPT-${version}${variant}`
+  }
+  return model.name ?? model.id
 }
 
 /**
