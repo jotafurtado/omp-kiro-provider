@@ -63,16 +63,17 @@ const HIDDEN_REASONING_PLACEHOLDER = "Reasoning hidden by provider"
 
 /** Map reasoning level to thinking budget in tokens. */
 function thinkingBudget(level: boolean | string | undefined): number {
-  if (level === "xhigh") return 50000
+  if (level === "max" || level === "xhigh") return 50000
   if (level === "high") return 30000
   if (level === "medium") return 20000
-  return 10000 // default / "low" / true
+  return 10000 // default / "minimal" / "low" / true
 }
 
-type ReasoningLevel = boolean | "off" | "low" | "medium" | "high" | "xhigh"
+const REASONING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const
+type ReasoningLevel = boolean | (typeof REASONING_LEVELS)[number]
 
 function isReasoningLevel(value: unknown): value is ReasoningLevel {
-  return value === true || value === false || value === "off" || value === "low" || value === "medium" || value === "high" || value === "xhigh"
+  return typeof value === "boolean" || (REASONING_LEVELS as readonly unknown[]).includes(value)
 }
 
 function readReasoningField(source: unknown, key: string): ReasoningLevel | undefined {
@@ -87,6 +88,9 @@ export function shouldRetryHttpStatus(status: number): boolean {
 }
 
 export function resolveReasoningLevel(model: Pick<ModelLike, "id" | "name">, options?: StreamOptions): ReasoningLevel | undefined {
+  // OMP signals "thinking off" by disabling reasoning rather than by name.
+  if (options?.disableReasoning === true) return false
+
   const direct = readReasoningField(options, "reasoning")
   if (direct !== undefined) return direct
 
@@ -98,7 +102,7 @@ export function resolveReasoningLevel(model: Pick<ModelLike, "id" | "name">, opt
   if (metadataReasoning !== undefined) return metadataReasoning
 
   const selector = `${model.id}:${model.name}`
-  const match = selector.match(/:(xhigh|high|medium|low|off)(?:\b|$)/)
+  const match = selector.match(/:(xhigh|high|medium|low|minimal|max|off)(?:\b|$)/)
   return match ? (match[1] as Exclude<ReasoningLevel, boolean>) : undefined
 }
 
@@ -394,6 +398,11 @@ export function createStreamKiro(deps: CoreDependencies) {
       // Per-attempt output state — separate from `output` so we can discard on retry
       let textBlock: TextContent | undefined
       let currentTextIdx = -1
+      let reasoningBlock: ThinkingContent | undefined
+      let currentReasoningIdx = -1
+      // Assigned once per request (before the retry loops); read by handleEvent.
+      let thinkingEnabled = false
+      let reasoningHidden = false
       let currentToolCall: { id: string; name: string; inputChunks: string[] } | undefined
       let thinkingParser: ThinkingTagParser | null = null
 
@@ -413,6 +422,7 @@ export function createStreamKiro(deps: CoreDependencies) {
 
       // Hidden reasoning state (hoisted for cleanup in error paths)
       let hiddenThinkingIndex: number | null = null
+      let hiddenThinkingBlock: ThinkingContent | undefined
       let hiddenMarkerTimer: ReturnType<typeof setTimeout> | null = null
       let hiddenMarkerEmitted = false
 
@@ -427,6 +437,19 @@ export function createStreamKiro(deps: CoreDependencies) {
         })
         textBlock = undefined
         currentTextIdx = -1
+      }
+
+      // --- Helper: close an open reasoning block ---
+      const endReasoningBlock = () => {
+        if (!reasoningBlock) return
+        eventBuffer.push({
+          type: "thinking_end",
+          contentIndex: currentReasoningIdx,
+          content: reasoningBlock.thinking,
+          partial: output,
+        })
+        reasoningBlock = undefined
+        currentReasoningIdx = -1
       }
 
       // --- Helper: finalize tool call into buffer ---
@@ -458,9 +481,27 @@ export function createStreamKiro(deps: CoreDependencies) {
       // --- Helper: handle a parsed Kiro event (writes to buffer) ---
       const handleEvent = (event: ReturnType<AwsEventStreamParser["feed"]>[number]) => {
         switch (event.type) {
+          case "reasoning": {
+            // Kiro 5.x models stream reasoning on a dedicated channel
+            // (reasoningContentEvent) instead of <thinking> tags in content.
+            if (!thinkingEnabled || reasoningHidden) break
+            if (!reasoningBlock) {
+              reasoningBlock = { type: "thinking", thinking: "" }
+              output.content.push(reasoningBlock)
+              currentReasoningIdx = output.content.length - 1
+              eventBuffer.push({ type: "thinking_start", contentIndex: currentReasoningIdx, partial: output })
+            }
+            const delta = event.text
+            reasoningBlock.thinking += delta
+            totalContentLength += delta.length
+            eventBuffer.push({ type: "thinking_delta", contentIndex: currentReasoningIdx, delta, partial: output })
+            break
+          }
+
           case "content": {
             // Close hidden reasoning breadcrumb on first real content
             closeHiddenBreadcrumb()
+            endReasoningBlock()
 
             if (thinkingParser) {
               thinkingParser.processChunk(event.content)
@@ -483,6 +524,7 @@ export function createStreamKiro(deps: CoreDependencies) {
             sawAnyToolCalls = true
             closeHiddenBreadcrumb()
             endTextBlock()
+            endReasoningBlock()
             finalizeToolCall()
             currentToolCall = {
               id: event.toolUseId || `call_${randomUUID().slice(0, 8)}`,
@@ -522,11 +564,14 @@ export function createStreamKiro(deps: CoreDependencies) {
 
       // --- Helper: reset per-attempt state and discard buffer ---
       const resetAttemptState = () => {
-        output.content = []
+        // An open hidden-reasoning breadcrumb is already on screen; keep it at its index.
+        output.content = hiddenThinkingIndex !== null && hiddenThinkingBlock ? [hiddenThinkingBlock] : []
         output.stopReason = "stop"
         output.errorMessage = undefined
         textBlock = undefined
         currentTextIdx = -1
+        reasoningBlock = undefined
+        currentReasoningIdx = -1
         currentToolCall = undefined
         thinkingParser = null
         eventBuffer = []
@@ -615,8 +660,8 @@ export function createStreamKiro(deps: CoreDependencies) {
         // Inject <thinking_mode> into system prompt so the model produces <thinking> tags.
         // Skip for reasoningHidden models (server-side reasoning, no tags emitted).
         const reasoningLevel = resolveReasoningLevel(model, options)
-        const thinkingEnabled = reasoningLevel === false || reasoningLevel === "off" ? false : !!reasoningLevel || model.reasoning
-        const reasoningHidden = !!model.reasoningHidden
+        thinkingEnabled = reasoningLevel === false || reasoningLevel === "off" ? false : !!reasoningLevel || !!model.reasoning
+        reasoningHidden = !!model.reasoningHidden
 
         let systemPromptOverride = context.systemPrompt
         if (thinkingEnabled && !reasoningHidden) {
@@ -669,6 +714,7 @@ export function createStreamKiro(deps: CoreDependencies) {
               thinking: "",
               redacted: true,
             }
+            hiddenThinkingBlock = block
             output.content.push(block)
             stream.push({ type: "thinking_start", contentIndex: hiddenThinkingIndex, partial: output })
             hiddenMarkerEmitted = false
@@ -816,10 +862,10 @@ export function createStreamKiro(deps: CoreDependencies) {
                     throw new Error(`Kiro account suspended (detected in stream). Content: ${event.content.slice(0, 200)}`)
                   }
 
-                  if (event.type === "content") {
-                    gotFirstContent = true
-                    lastContentTime = Date.now()
-                  }
+                  // Any decoded frame shows the stream is alive; a model can reason or
+                  // stream tool input for minutes before its first answer text.
+                  gotFirstContent = true
+                  lastContentTime = Date.now()
 
                   if (!capacityRetryable) {
                     handleEvent(event)
@@ -854,9 +900,11 @@ export function createStreamKiro(deps: CoreDependencies) {
               throw new Error("INSUFFICIENT_MODEL_CAPACITY after all retries")
             }
 
-            // Empty response detection: got 200 but zero content events
-            const hasContent = output.content.length > 0
-            if (!hasContent && outerAttempt < maxAttempts - 1) {
+            // Empty response detection: got 200 but no answer text or tool call.
+            // Reasoning alone is not an answer, but once it is on screen a retry
+            // would show it twice, so report the turn instead.
+            const hasAnswer = output.content.some((block) => block.type !== "thinking")
+            if (!hasAnswer && !attemptEventsFlushed && outerAttempt < maxAttempts - 1) {
               try { await reader?.cancel() } catch { /* ok */ }
               try { reader?.releaseLock() } catch { /* ok */ }
               reader = undefined
@@ -865,8 +913,10 @@ export function createStreamKiro(deps: CoreDependencies) {
             }
 
             // Last attempt returned empty — error instead of silent empty response
-            if (!hasContent) {
-              throw new Error("Kiro returned an empty response after all retries")
+            if (!hasAnswer) {
+              throw new Error(attemptEventsFlushed
+                ? "Kiro ended the turn after reasoning, without an answer"
+                : "Kiro returned an empty response after all retries")
             }
 
             // Success — finalize blocks and flush buffered events
@@ -921,6 +971,7 @@ export function createStreamKiro(deps: CoreDependencies) {
 
             // 5. Close hidden reasoning if still open (defensive)
             closeHiddenBreadcrumb()
+            endReasoningBlock()
 
             // 6. Emit text_end for the final text block
             if (textBlockIdx !== null) {

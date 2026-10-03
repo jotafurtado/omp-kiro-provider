@@ -10,6 +10,7 @@ import assert from "node:assert/strict"
 
 import { buildKiroPayload } from "../src/converters.ts"
 import { AwsEventStreamParser } from "../src/eventstream.ts"
+import { resolveReasoningLevel } from "../src/core.ts"
 import type { ContextLike, KiroEvent } from "../src/types.ts"
 
 // ============================================================================
@@ -305,6 +306,43 @@ describe("AwsEventStreamParser", () => {
 
     assert.equal(events1.length, 1)
     assert.equal(events2.length, 0) // deduplicated
+  })
+
+  it("parses reasoning content events", () => {
+    const parser = new AwsEventStreamParser()
+    const events = parser.feed(
+      Buffer.from('headers:reasoningContentEvent {"text":"37"}headers:reasoningContentEvent {"text":" * 89"}'),
+    )
+
+    assert.equal(events.length, 2)
+    assert.equal(events[0].type, "reasoning")
+    assert.equal(events[1].type, "reasoning")
+    if (events[0].type === "reasoning" && events[1].type === "reasoning") {
+      assert.equal(events[0].text, "37")
+      assert.equal(events[1].text, " * 89")
+    }
+  })
+
+  it("skips empty reasoning deltas", () => {
+    const parser = new AwsEventStreamParser()
+
+    assert.deepEqual(parser.feed(Buffer.from('{"text":""}')), [])
+  })
+
+  it("ignores reasoning payloads whose text is not a string", () => {
+    const parser = new AwsEventStreamParser()
+
+    assert.deepEqual(parser.feed(Buffer.from('{"text":37}{"text":{"redacted":true}}')), [])
+  })
+
+  it("drops a re-delivered reasoning delta like a content delta", () => {
+    const parser = new AwsEventStreamParser()
+    const events = parser.feed(Buffer.from('{"text":"step"}{"text":"step"}{"content":"step"}'))
+
+    assert.deepEqual(events, [
+      { type: "reasoning", text: "step" },
+      { type: "content", content: "step" },
+    ])
   })
 
   it("parses tool start events", () => {
@@ -767,5 +805,33 @@ describe("buildKiroPayload with history truncation", () => {
     assert.ok(content.includes("<thinking_mode>enabled</thinking_mode>"))
     assert.ok(content.includes("<max_thinking_length>10000</max_thinking_length>"))
     assert.ok(content.includes("Think about this"))
+  })
+})
+
+// ============================================================================
+// Reasoning level resolution
+// ============================================================================
+
+describe("resolveReasoningLevel", () => {
+  const model = { id: "claude-opus-5-5", name: "Claude Opus 5.5" }
+
+  it("returns false when OMP disables reasoning", () => {
+    assert.equal(resolveReasoningLevel(model, { disableReasoning: true }), false)
+    assert.equal(resolveReasoningLevel(model, { reasoning: "high", disableReasoning: true }), false)
+  })
+
+  it("uses the level OMP passes through", () => {
+    assert.equal(resolveReasoningLevel(model, { reasoning: "high" }), "high")
+    assert.equal(resolveReasoningLevel(model, { reasoningEffort: "xhigh" }), "xhigh")
+  })
+
+  it("falls back to a selector suffix in the model id", () => {
+    assert.equal(resolveReasoningLevel({ id: "claude-opus-5-5:medium", name: "Claude Opus 5.5" }), "medium")
+  })
+
+  it("accepts OMP's minimal and max efforts", () => {
+    assert.equal(resolveReasoningLevel(model, { reasoning: "minimal" }), "minimal")
+    assert.equal(resolveReasoningLevel(model, { reasoning: "max" }), "max")
+    assert.equal(resolveReasoningLevel({ id: "claude-opus-5-5:max", name: "Claude Opus 5.5" }), "max")
   })
 })
