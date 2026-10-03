@@ -152,6 +152,25 @@ describe("Kiro usage provider", () => {
     assert.deepEqual(report?.limits.map((limit) => limit.id), ["kiro:CREDIT", "kiro:usage-1"])
   })
 
+  it("rejects a credential that is not a valid header value without echoing it", async () => {
+    const provider = createKiroUsageProvider({
+      managementBase: BASE,
+      getProfileArn: () => PROFILE_ARN,
+      // Headers validates values as fetch does, and fetch echoes an invalid value in its error.
+      fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        new Headers(init?.headers)
+        return json({ usageBreakdownList: [{ resourceType: "CREDIT", currentUsage: 1, usageLimit: 50 }] })
+      }) as typeof fetch,
+    })
+    const error = await provider.fetchUsage({
+      provider: "kiro",
+      credential: { type: "oauth", accessToken: "token\r\nsecret-part" },
+    }).catch((caught: unknown) => caught)
+    assert.ok(error instanceof Error)
+    assert.match(error.message, /not valid in an HTTP header/)
+    assert.doesNotMatch(error.message, /secret-part/)
+  })
+
   it("does not support other providers or missing credentials", () => {
     const provider = createKiroUsageProvider({ managementBase: BASE, getProfileArn: () => undefined })
     assert.equal(provider.supports({ provider: "other", credential: { type: "oauth", accessToken: "t" } }), false)

@@ -1,4 +1,4 @@
-import { isKiroApiKey, kiroTokenTypeHeaders } from "./auth/token-type.ts"
+import { isKiroApiKey, kiroAuthHeaders } from "./auth/token-type.ts"
 
 export type OverlayModel = {
   id: string
@@ -288,9 +288,8 @@ export async function requestManagement(
     const response = await fetchImpl(url, {
       method: postHeaders ? "POST" : "GET",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
         Accept: "application/json",
-        ...kiroTokenTypeHeaders(apiKey),
+        ...kiroAuthHeaders(apiKey),
         ...postHeaders,
       },
       ...(postHeaders ? { body: "{}" } : {}),

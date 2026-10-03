@@ -10,6 +10,11 @@ export function isKiroApiKey(token: string): boolean {
   return token.startsWith("ksk_")
 }
 
-export function kiroTokenTypeHeaders(token: string): Record<string, string> {
-  return isKiroApiKey(token) ? { TokenType: "API_KEY" } : {}
+/**
+ * The credential headers for a request. A token fetch would reject throws here instead, because
+ * fetch's error quotes the whole invalid header value, credential included.
+ */
+export function kiroAuthHeaders(token: string): Record<string, string> {
+  if (/[^\x20-\x7e]/.test(token)) throw new Error("Kiro credential contains characters that are not valid in an HTTP header")
+  return { Authorization: `Bearer ${token}`, ...(isKiroApiKey(token) ? { TokenType: "API_KEY" } : {}) }
 }

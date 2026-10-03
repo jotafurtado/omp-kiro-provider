@@ -36,7 +36,7 @@ import { AwsEventStreamParser, type StreamErrorEvent } from "./eventstream.ts"
 import { ThinkingTagParser } from "./thinking-parser.ts"
 import { parseBracketToolCalls } from "./bracket-tool-parser.ts"
 import { kiroBaseForRegion, kiroRegionFromProfileArn, resolveKiroProfileArn } from "./dynamic-models.ts"
-import { isKiroApiKey, kiroTokenTypeHeaders } from "./auth/token-type.ts"
+import { isKiroApiKey, kiroAuthHeaders } from "./auth/token-type.ts"
 import { getStoredProfileArn } from "./oauth.ts"
 
 // Retry / timeout configuration
@@ -151,7 +151,6 @@ function buildKiroHeaders(accessToken: string): Record<string, string> {
   const mid = randomUUID().replace(/-/g, "")
   const ua = `aws-sdk-rust/1.0.0 ua/2.1 os/other lang/rust api/codewhispererstreaming#1.28.3 m/E app/AmazonQ-For-CLI md/appVersion-1.28.3-${mid}`
   return {
-    "Authorization": `Bearer ${accessToken}`,
     "Content-Type": "application/x-amz-json-1.0",
     "Accept": "application/json",
     "X-Amz-Target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
@@ -161,7 +160,7 @@ function buildKiroHeaders(accessToken: string): Record<string, string> {
     "x-amzn-kiro-agent-mode": "vibe",
     "amz-sdk-invocation-id": randomUUID(),
     "amz-sdk-request": "attempt=1; max=1",
-    ...kiroTokenTypeHeaders(accessToken),
+    ...kiroAuthHeaders(accessToken),
   }
 }
 
@@ -768,10 +767,9 @@ export function createStreamKiro(deps: CoreDependencies) {
                 const refreshedCliToken = resyncCliToken()
                 if (refreshedCliToken) {
                   apiKey = refreshedCliToken
-                  reqHeaders.Authorization = `Bearer ${apiKey}`
                   // The type declared for the previous credential must not carry over.
                   delete reqHeaders.TokenType
-                  Object.assign(reqHeaders, kiroTokenTypeHeaders(apiKey))
+                  Object.assign(reqHeaders, kiroAuthHeaders(apiKey))
                   cliIdentityResynced = true
                   continue
                 }
