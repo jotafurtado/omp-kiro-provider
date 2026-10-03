@@ -33,8 +33,8 @@ export type FetchDynamicKiroModelsOptions = {
 
 export const BUILDER_ID_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX"
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
-const DEFAULT_TIMEOUT_MS = 10_000
-const DEFAULT_MAX_BODY_BYTES = 1_048_576
+export const DEFAULT_TIMEOUT_MS = 10_000
+export const DEFAULT_MAX_BODY_BYTES = 1_048_576
 const DEFAULT_CONTEXT_WINDOW = 128_000
 const DEFAULT_MAX_TOKENS = 8192
 
@@ -269,7 +269,8 @@ function managementBases(apiBase: string): string[] {
 
 type ManagementResponse = { status: number; body: unknown; message?: string }
 
-async function requestManagement(
+/** One management API call: Kiro auth headers, a timeout, and a size-bounded JSON body. */
+export async function requestManagement(
   fetchImpl: typeof fetch,
   url: string,
   apiKey: string,

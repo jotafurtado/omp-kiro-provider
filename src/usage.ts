@@ -1,36 +1,34 @@
 /**
- * Kiro usage provider for OMP's `/usage` and `omp usage`.
- *
- * Calls Kiro's management API `GET /Get-Usage-Limits` with the account profile
- * and maps the credit buckets into OMP's normalized UsageReport shape.
- * Types mirror @oh-my-pi/pi-ai structurally so the extension stays dependency-free.
+ * Kiro credit usage for OMP's `/usage` and `omp usage`: reads `GET /Get-Usage-Limits` for the
+ * account profile and maps its credit buckets onto OMP's UsageReport. The types mirror
+ * @oh-my-pi/pi-ai's structurally, so the extension stays dependency-free.
  */
 
-import { resolveKiroProfileArn } from "./dynamic-models.ts"
+import {
+  DEFAULT_MAX_BODY_BYTES,
+  DEFAULT_TIMEOUT_MS,
+  kiroBaseForRegion,
+  kiroRegionFromProfileArn,
+  requestManagement,
+  resolveKiroProfileArn,
+} from "./dynamic-models.ts"
 
 const PROVIDER = "kiro"
 const WARNING_FRACTION = 0.9
-const DEFAULT_TIMEOUT_MS = 10_000
 
-type UsageStatus = "ok" | "warning" | "exhausted" | "unknown"
-
-export interface UsageCredential {
-  type: "api_key" | "oauth"
-  apiKey?: string
-  accessToken?: string
-  accountId?: string
-}
-
-export interface UsageFetchParams {
+type UsageFetchParams = {
   provider: string
-  credential: UsageCredential
+  credential: { type: "api_key" | "oauth"; apiKey?: string; accessToken?: string; accountId?: string }
+  signal?: AbortSignal
 }
 
-export interface UsageLimit {
+type UsageWindow = { id: string; label: string; resetsAt?: number; resetLabel?: string }
+
+type UsageLimit = {
   id: string
   label: string
-  scope: { provider: string; windowId?: string; tier?: string; accountId?: string }
-  window?: { id: string; label: string; resetsAt?: number; resetLabel?: string }
+  scope: { provider: string; windowId: string; tier?: string; accountId?: string }
+  window: UsageWindow
   amount: {
     used?: number
     limit?: number
@@ -39,27 +37,19 @@ export interface UsageLimit {
     remainingFraction?: number
     unit: "credits" | "unknown"
   }
-  status?: UsageStatus
+  status: "ok" | "warning" | "exhausted" | "unknown"
   notes?: string[]
 }
 
-export interface UsageReport {
+type UsageReport = {
   provider: string
   fetchedAt: number
   limits: UsageLimit[]
   notes?: string[]
-  metadata?: Record<string, unknown>
+  metadata: Record<string, unknown>
 }
 
-export interface KiroUsageOptions {
-  managementBase: string
-  getProfileArn: () => string | undefined
-  fetchImpl?: typeof fetch
-  now?: () => number
-  timeoutMs?: number
-}
-
-interface UsageBreakdown {
+type UsageBreakdown = {
   resourceType?: string
   displayName?: string
   currentUsage?: number
@@ -78,13 +68,20 @@ interface UsageBreakdown {
   }
 }
 
-interface UsageLimitsResponse {
+type UsageLimitsResponse = {
   nextDateReset?: number | string
   usageBreakdown?: UsageBreakdown
   usageBreakdownList?: UsageBreakdown[]
   subscriptionInfo?: { subscriptionTitle?: string }
   overageConfiguration?: { overageStatus?: string }
   userInfo?: { userId?: string }
+}
+
+export type KiroUsageOptions = {
+  managementBase: string
+  getProfileArn: () => string | undefined
+  fetchImpl?: typeof fetch
+  now?: () => number
 }
 
 /** Kiro sends epoch seconds or ISO strings; OMP wants epoch milliseconds. */
@@ -103,7 +100,7 @@ function buildLimit(args: {
   label: string
   used?: number
   limit?: number
-  window: { id: string; label: string; resetsAt?: number; resetLabel?: string }
+  window: UsageWindow
   unit: UsageLimit["amount"]["unit"]
   notes?: string[]
   tier?: string
@@ -111,7 +108,7 @@ function buildLimit(args: {
 }): UsageLimit {
   const limit = args.limit !== undefined && args.limit > 0 ? args.limit : undefined
   const usedFraction = limit !== undefined && args.used !== undefined ? args.used / limit : undefined
-  let status: UsageStatus = "unknown"
+  let status: UsageLimit["status"] = "unknown"
   if (usedFraction !== undefined) {
     status = usedFraction >= 1 ? "exhausted" : usedFraction >= WARNING_FRACTION ? "warning" : "ok"
   }
@@ -139,8 +136,8 @@ function buildLimit(args: {
   }
 }
 
-export function toUsageReport(raw: UsageLimitsResponse, fetchedAt: number, credentialAccountId?: string): UsageReport {
-  const buckets = raw.usageBreakdownList?.length
+function toUsageReport(raw: UsageLimitsResponse, fetchedAt: number, credentialAccountId?: string): UsageReport {
+  const buckets = Array.isArray(raw.usageBreakdownList) && raw.usageBreakdownList.length
     ? raw.usageBreakdownList
     : raw.usageBreakdown ? [raw.usageBreakdown] : []
   const plan = raw.subscriptionInfo?.subscriptionTitle
@@ -163,15 +160,17 @@ export function toUsageReport(raw: UsageLimitsResponse, fetchedAt: number, crede
       tier: plan,
       accountId,
     })]
-    // Free-trial bonus credits expire on their own date instead of resetting monthly.
+    // Free-trial bonus credits expire on their own date instead of resetting monthly, and an
+    // expired trial has none left to report.
     const trial = bucket.freeTrialInfo
-    if (trial) {
+    const expiresAt = toEpochMs(trial?.freeTrialExpiry)
+    if (trial && !(expiresAt !== undefined && expiresAt <= fetchedAt)) {
       result.push(buildLimit({
         id: `kiro:${id}:bonus`,
         label: "Bonus credits",
         used: finite(trial.currentUsageWithPrecision ?? trial.currentUsage),
         limit: finite(trial.usageLimitWithPrecision ?? trial.usageLimit),
-        window: { id: "bonus", label: "Bonus", resetsAt: toEpochMs(trial.freeTrialExpiry), resetLabel: "expires" },
+        window: { id: "bonus", label: "Bonus", resetsAt: expiresAt, resetLabel: "expires" },
         unit,
         tier: plan,
         accountId,
@@ -195,39 +194,39 @@ export function toUsageReport(raw: UsageLimitsResponse, fetchedAt: number, crede
 export function createKiroUsageProvider(options: KiroUsageOptions) {
   const fetchImpl = options.fetchImpl ?? fetch
   const now = options.now ?? (() => Date.now())
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-  const accessOf = (credential: UsageCredential) =>
+  const accessOf = (credential: UsageFetchParams["credential"]) =>
     (credential.type === "api_key" ? credential.apiKey : credential.accessToken)?.trim()
 
   return {
     id: PROVIDER,
-    cacheVersion: 2,
     supports: ({ provider, credential }: UsageFetchParams) => provider === PROVIDER && Boolean(accessOf(credential)),
-    async fetchUsage({ credential }: UsageFetchParams): Promise<UsageReport | null> {
+    async fetchUsage({ credential, signal }: UsageFetchParams): Promise<UsageReport | null> {
       const apiKey = accessOf(credential)
       if (!apiKey) return null
       const profileArn = await resolveKiroProfileArn({
         apiKey,
         apiBase: options.managementBase,
         fetchImpl,
-        timeoutMs,
         profileArn: options.getProfileArn(),
+        signal,
       })
-      if (!profileArn) throw new Error("No accessible Kiro profile found for usage lookup.")
+      if (!profileArn) throw new Error("No accessible Kiro profile found for usage lookup")
 
-      const url = new URL(`${options.managementBase.replace(/\/+$/, "")}/Get-Usage-Limits`)
+      // Usage lives in the profile's region, like the model catalog.
+      const url = new URL(`${kiroBaseForRegion(options.managementBase, kiroRegionFromProfileArn(profileArn))}/Get-Usage-Limits`)
       url.searchParams.set("origin", "KIRO_CLI")
       url.searchParams.set("profileArn", profileArn)
       url.searchParams.set("resourceType", "CREDIT")
       url.searchParams.set("isEmailRequired", "false")
-      const response = await fetchImpl(url.toString(), {
-        method: "GET",
-        headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
-        signal: AbortSignal.timeout(timeoutMs),
-      })
+      const { status, body, message } = await requestManagement(
+        fetchImpl, url.toString(), apiKey, DEFAULT_TIMEOUT_MS, DEFAULT_MAX_BODY_BYTES, undefined, signal,
+      )
       // Throw so OMP logs the failure and keeps serving the last good report.
-      if (!response.ok) throw new Error(`Kiro usage request failed (${response.status})`)
-      return toUsageReport(await response.json() as UsageLimitsResponse, now(), credential.accountId)
+      if (status < 200 || status >= 300) {
+        throw new Error(`Get-Usage-Limits returned HTTP ${status}${message ? `: ${message}` : ""}`)
+      }
+      if (typeof body !== "object" || body === null) throw new Error("Get-Usage-Limits returned no usable body")
+      return toUsageReport(body as UsageLimitsResponse, now(), credential.accountId)
     },
   }
 }

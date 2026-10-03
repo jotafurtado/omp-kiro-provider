@@ -19,8 +19,9 @@ This is an unofficial, community-maintained provider. It is not affiliated with,
 - Retry handling for capacity errors, empty responses, 5xx responses and server-side stream failures, only while nothing has reached the screen. Errors Kiro sends mid-stream are reported, not swallowed.
 - Runtime model discovery. With a Kiro OAuth or API credential, the account's live catalog is the model list, so new Kiro models need no change here.
 - `models.json` as the offline catalog and as hints for what the live catalog leaves out.
+- Kiro credit usage in OMP's `/usage` and `omp usage`.
 - Basic cost metadata set to zero because Kiro trial/subscription usage is not billed through OMP.
-- Unit tests for converters, event-stream parsing, model catalog invariants, and dynamic discovery.
+- Unit tests for converters, event-stream parsing, model catalog invariants, dynamic discovery, and usage.
 
 ## Install
 
@@ -111,6 +112,15 @@ Only one Kiro response streams at a time across every `omp` session on the machi
 sessions and subagents wait their turn, because parallel streams on one account draw throttling.
 Set `OMP_KIRO_STREAM_GATE=0` (or `KIRO_STREAM_GATE=0`) to let them stream in parallel.
 
+### Credit usage
+
+`/usage` in interactive OMP and `omp usage` (OMP 18.4.1 or newer) show the account's Kiro credits:
+the monthly allowance with its reset date and, while a free trial lasts, its bonus credits with their
+expiry. The provider reads them from
+`GET https://management.{region}.kiro.dev/Get-Usage-Limits?origin=KIRO_CLI&profileArn=...&resourceType=CREDIT`,
+using the same profile and region as model discovery. If the request fails, OMP keeps showing the
+last report it received.
+
 ## Models
 
 With a Kiro OAuth or API credential, the provider resolves the account profile and calls
@@ -174,6 +184,7 @@ omp-kiro-provider/
 ├── models.json              # committed capability overlay and fallback catalog
 ├── src/models.ts            # small filesystem loader and catalog validation
 ├── src/dynamic-models.ts    # ListAvailableModels parse, merge, and fetch
+├── src/usage.ts             # Get-Usage-Limits credit report for /usage
 ├── src/core.ts              # streaming, retries, headers, token selection
 ├── src/converters.ts        # OMP message/tool payload conversion
 ├── src/eventstream.ts       # AWS Event Stream decoder

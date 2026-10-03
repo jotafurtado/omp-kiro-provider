@@ -67,6 +67,6 @@ export default function (pi: ExtensionAPI) {
     usage: createKiroUsageProvider({
       managementBase: MANAGEMENT_BASE,
       getProfileArn: getStoredProfileArn,
-    }) as never,
+    }),
   })
 }
