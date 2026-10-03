@@ -54,6 +54,14 @@ function findJsonEnd(text: string, start: number): number {
   return -1
 }
 
+/** A call quoted as Markdown code is an example rather than an invocation. */
+function isQuotedAsCode(text: string, index: number): boolean {
+  const before = text.slice(0, index)
+  const fences = before.match(/^ {0,3}(```|~~~)/gm)?.length ?? 0
+  const line = before.slice(before.lastIndexOf("\n") + 1)
+  return fences % 2 === 1 || /^( {4}|\t)\s*$/.test(line) || line.split("`").length % 2 === 0
+}
+
 /**
  * Extract bracket-style tool calls from content text.
  * Returns parsed tool calls and the text with bracket patterns removed.
@@ -69,7 +77,7 @@ export function parseBracketToolCalls(text: string): BracketParseResult {
     const jsonStart = match.index + match[0].length
 
     const braceIdx = text.indexOf("{", jsonStart)
-    if (braceIdx >= 0 && braceIdx === jsonStart) {
+    if (braceIdx >= 0 && braceIdx === jsonStart && !isQuotedAsCode(text, match.index)) {
       const jsonEndIdx = findJsonEnd(text, braceIdx)
       if (jsonEndIdx >= 0) {
         const afterJson = text.indexOf("]", jsonEndIdx + 1)

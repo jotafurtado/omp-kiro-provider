@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, describe, it } from "node:test"
-import type { AssistantMessageEvent, AssistantMessageLike, CoreDependencies, ModelLike, StreamOptions } from "../src/types.ts"
+import type { AssistantMessageEvent, AssistantMessageLike, ContextLike, CoreDependencies, ModelLike, StreamOptions } from "../src/types.ts"
 import { chunked, content, eventStream, frame, frames, reasoning } from "./event-frames.ts"
 
 // Isolate the public login/refresh API from the developer's credentials.
@@ -14,7 +14,7 @@ const previousProfile = process.env.USERPROFILE
 process.env.HOME = home
 process.env.USERPROFILE = home
 const { login, refreshToken, getStoredProfileArn } = await import("../src/oauth.ts")
-const { createStreamKiro } = await import("../src/core.ts")
+const { buildKiroPayload, createStreamKiro } = await import("../src/core.ts")
 after(() => {
   if (previousHome === undefined) delete process.env.HOME
   else process.env.HOME = previousHome
@@ -120,12 +120,8 @@ describe("organization login", () => {
         result: () => result,
         async *[Symbol.asyncIterator]() { yield* events },
       }),
-      cwd: () => home,
       now: () => Date.now(),
-      uuid: () => "test-conversation",
       env: { OMP_KIRO_STREAM_GATE: "0" },
-      authPaths: [],
-      homeDir: home,
       calculateCost: () => {},
     })
     const output = await streamKiro({
@@ -350,12 +346,8 @@ describe("cancelling while the profile is resolved", () => {
         result: () => result,
         async *[Symbol.asyncIterator]() { yield* events },
       }),
-      cwd: () => home,
       now: () => Date.now(),
-      uuid: () => "test-conversation",
       env: { OMP_KIRO_STREAM_GATE: "0" },
-      authPaths: [],
-      homeDir: home,
       calculateCost: () => {},
     })
     const output = await streamKiro({
@@ -376,7 +368,7 @@ function kiroTurns(
   model: Partial<ModelLike> = {},
   deps: Partial<CoreDependencies> = {},
   events: AssistantMessageEvent[] = [],
-): (apiKey: string, options?: StreamOptions) => Promise<AssistantMessageLike> {
+): (apiKey: string, options?: StreamOptions, context?: ContextLike) => Promise<AssistantMessageLike> {
   const streamKiro = createStreamKiro({
     apiBase: "https://runtime.us-east-1.kiro.dev",
     fetchImpl,
@@ -394,19 +386,15 @@ function kiroTurns(
         async *[Symbol.asyncIterator]() { yield* events },
       }
     },
-    cwd: () => home,
     now: () => Date.now(),
-    uuid: () => "test-conversation",
     env: { OMP_KIRO_STREAM_GATE: "0" },
-    authPaths: [],
-    homeDir: home,
     calculateCost: () => {},
     ...deps,
   })
-  return (apiKey, options = {}) => streamKiro({
+  return (apiKey, options = {}, context = { messages: [{ role: "user", content: "Reply OK" }] }) => streamKiro({
     id: "claude-opus-5-5", name: "Claude Opus 5.5", api: "kiro-custom", provider: "kiro",
     reasoning: false, input: ["text"], contextWindow: 1_000_000, maxTokens: 128_000, ...model,
-  }, { messages: [{ role: "user", content: "Reply OK" }] }, { ...options, apiKey }).result()
+  }, context, { ...options, apiKey }).result()
 }
 
 /** Streams one "Reply OK" turn through `fetchImpl` and returns the final message. */
@@ -655,6 +643,60 @@ describe("reasoning stream", () => {
     }) as typeof fetch, "max-effort-token", { reasoning: "max" })
     assert.equal(output.stopReason, "stop", output.errorMessage)
     assert.match(body, /<max_thinking_length>50000<\/max_thinking_length>/)
+  })
+})
+
+describe("tool calls written as text", () => {
+  const bracketCall = '[Called read with args: {"path":"a"}]'
+
+  it("recovers one from a model that streams without thinking tags", async () => {
+    const { fetchImpl } = kiro([content(bracketCall)])
+    const events: AssistantMessageEvent[] = []
+    const output = await kiroTurns(fetchImpl, { id: "minimax-m2-5" }, {}, events)("text-tool-token")
+    assert.equal(output.stopReason, "toolUse", output.errorMessage)
+    assert.deepEqual(events.map((event) => event.type),
+      ["start", "text_start", "text_delta", "toolcall_start", "toolcall_end", "text_end", "done"])
+    const calls = output.content.flatMap((block) => block.type === "toolCall" ? [[block.name, block.arguments]] : [])
+    assert.deepEqual(calls, [["read", { path: "a" }]])
+  })
+
+  // Kiro caps tool names at 64 characters, so the model sees and echoes the shortened name.
+  it("gives a recovered call the tool's full name", async () => {
+    const name = `mcp_${"long_server_name_".repeat(4)}read`
+    const payload = buildKiroPayload("minimax-m2-5", { messages: [], tools: [{ name, description: "Read" }] })
+    const tools = payload.conversationState.currentMessage.userInputMessage.userInputMessageContext?.tools as
+      Array<{ toolSpecification: { name: string } }>
+    const shortName = tools[0].toolSpecification.name
+    assert.notEqual(shortName, name)
+
+    const { fetchImpl } = kiro([content(`[Called ${shortName} with args: {"path":"a"}]`)])
+    const output = await kiroTurns(fetchImpl, { id: "minimax-m2-5" })("long-name-token", {}, {
+      messages: [{ role: "user", content: "Read a" }], tools: [{ name, description: "Read" }],
+    })
+    assert.equal(output.stopReason, "toolUse", output.errorMessage)
+    assert.deepEqual(output.content.flatMap((block) => block.type === "toolCall" ? [block.name] : []), [name])
+  })
+
+  it("leaves Claude's text as written", async () => {
+    const text = `Kiro history shows ${bracketCall} for each call.`
+    const { fetchImpl } = kiro([content(text)])
+    const events: AssistantMessageEvent[] = []
+    const output = await kiroTurns(fetchImpl, { reasoning: true }, {}, events)("claude-text-token", { reasoning: "high" })
+    assert.equal(output.stopReason, "stop", output.errorMessage)
+    assert.deepEqual(output.content, [{ type: "text", text }])
+    assert.deepEqual(events.map((event) => event.type), ["start", "text_start", "text_delta", "text_end", "done"])
+  })
+})
+
+describe("cancelling a stream", () => {
+  // Cancelling the reader ends a pending read as if the stream had finished.
+  it("reports an abort that lands while a read is pending", async () => {
+    const controller = new AbortController()
+    const open = new ReadableStream<Uint8Array>({ start(stream) { stream.enqueue(frames(content("partial"))) } })
+    const { fetchImpl } = kiro([open])
+    setTimeout(() => controller.abort(), 200)
+    const output = await kiroTurns(fetchImpl)("abort-mid-stream-token", { signal: controller.signal })
+    assert.equal(output.stopReason, "aborted", output.errorMessage)
   })
 })
 
