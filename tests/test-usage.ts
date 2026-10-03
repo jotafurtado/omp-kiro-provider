@@ -156,7 +156,7 @@ describe("Kiro usage provider", () => {
     const provider = createKiroUsageProvider({
       managementBase: BASE,
       getProfileArn: () => PROFILE_ARN,
-      // Headers validates values as fetch does, and fetch echoes an invalid value in its error.
+      // Headers validates values as fetch does, so a token that reached fetch would fail here with its value quoted.
       fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
         new Headers(init?.headers)
         return json({ usageBreakdownList: [{ resourceType: "CREDIT", currentUsage: 1, usageLimit: 50 }] })

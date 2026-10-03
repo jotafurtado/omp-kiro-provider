@@ -289,8 +289,8 @@ export async function requestManagement(
       method: postHeaders ? "POST" : "GET",
       headers: {
         Accept: "application/json",
-        ...kiroAuthHeaders(apiKey),
         ...postHeaders,
+        ...kiroAuthHeaders(apiKey),
       },
       ...(postHeaders ? { body: "{}" } : {}),
       signal: controller.signal,

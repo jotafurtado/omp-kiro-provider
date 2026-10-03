@@ -117,7 +117,7 @@ Set `OMP_KIRO_STREAM_GATE=0` (or `KIRO_STREAM_GATE=0`) to let them stream in par
 `/usage` in interactive OMP and `omp usage` (OMP 18.4.1 or newer) show the account's Kiro credits:
 the monthly allowance with its reset date and, while a free trial lasts, its bonus credits with their
 expiry. The provider reads them from
-`GET https://management.{region}.kiro.dev/Get-Usage-Limits?origin=KIRO_CLI&profileArn=...&resourceType=CREDIT`,
+`GET https://management.{region}.kiro.dev/Get-Usage-Limits?origin=KIRO_CLI&profileArn=...&resourceType=CREDIT&isEmailRequired=false`,
 using the same profile and region as model discovery. If the request fails, OMP keeps showing the
 last report it received.
 

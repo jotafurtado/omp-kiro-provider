@@ -11,8 +11,8 @@ export function isKiroApiKey(token: string): boolean {
 }
 
 /**
- * The credential headers for a request. A token fetch would reject throws here instead, because
- * fetch's error quotes the whole invalid header value, credential included.
+ * The credential headers for a request. A token that is not a valid header value throws here,
+ * before fetch, because fetch's error quotes the whole value, credential included.
  */
 export function kiroAuthHeaders(token: string): Record<string, string> {
   if (/[^\x20-\x7e]/.test(token)) throw new Error("Kiro credential contains characters that are not valid in an HTTP header")

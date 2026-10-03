@@ -6,6 +6,7 @@ import {
   fetchDynamicKiroModels,
   mergeLiveWithOverlay,
   parseLiveModels,
+  requestManagement,
   resolveKiroProfileArn,
   type OverlayModel,
 } from "../src/dynamic-models.ts"
@@ -705,5 +706,21 @@ describe("resolveKiroProfileArn", () => {
       { KIRO_PROFILE_ARN: PROFILE_ARN })
     assert.equal(arn, PROFILE_ARN)
     assert.equal(calls, 0)
+  })
+})
+
+describe("requestManagement", () => {
+  it("sends the credential headers even when a caller passes its own", async () => {
+    let headers: Record<string, string> = {}
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      headers = init?.headers as Record<string, string>
+      return Response.json({})
+    }) as typeof fetch
+    await requestManagement(fetchImpl, `${API_BASE}/`, "oauth-token", 1_000, 1_000, {
+      "Content-Type": "application/x-amz-json-1.0",
+      Authorization: "Bearer other",
+    })
+    assert.equal(headers.Authorization, "Bearer oauth-token")
+    assert.equal(headers["Content-Type"], "application/x-amz-json-1.0")
   })
 })
