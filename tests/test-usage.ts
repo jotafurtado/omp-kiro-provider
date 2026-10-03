@@ -56,8 +56,7 @@ describe("Kiro usage provider", () => {
     assert.equal(monthly.window?.resetsAt, 1_800_000_000_000)
     assert.equal(bonus.status, "exhausted")
     assert.equal(bonus.window?.resetLabel, "expires")
-    // The plan labels the limit, and without a credential id the Kiro user id identifies the account.
-    assert.equal(monthly.scope.tier, "KIRO PRO")
+    // Without a credential id, the Kiro user id identifies the account.
     assert.equal(monthly.scope.accountId, "user-1")
     assert.equal(report?.metadata?.accountId, "user-1")
 

@@ -27,7 +27,7 @@ type UsageWindow = { id: string; label: string; resetsAt?: number; resetLabel?: 
 type UsageLimit = {
   id: string
   label: string
-  scope: { provider: string; windowId: string; tier?: string; accountId?: string }
+  scope: { provider: string; windowId: string; accountId?: string }
   window: UsageWindow
   amount: {
     used?: number
@@ -103,7 +103,6 @@ function buildLimit(args: {
   window: UsageWindow
   unit: UsageLimit["amount"]["unit"]
   notes?: string[]
-  tier?: string
   accountId?: string
 }): UsageLimit {
   const limit = args.limit !== undefined && args.limit > 0 ? args.limit : undefined
@@ -120,7 +119,6 @@ function buildLimit(args: {
     scope: {
       provider: PROVIDER,
       windowId: window.id,
-      ...(args.tier ? { tier: args.tier } : {}),
       ...(args.accountId ? { accountId: args.accountId } : {}),
     },
     window,
@@ -157,7 +155,6 @@ function toUsageReport(raw: UsageLimitsResponse, fetchedAt: number, credentialAc
       window: { id: "monthly", label: "Monthly", resetsAt: toEpochMs(bucket.nextDateReset ?? raw.nextDateReset) },
       unit,
       notes: overages && overages > 0 ? [`Overages: ${overages}`] : undefined,
-      tier: plan,
       accountId,
     })]
     // Free-trial bonus credits expire on their own date instead of resetting monthly, and an
@@ -172,7 +169,6 @@ function toUsageReport(raw: UsageLimitsResponse, fetchedAt: number, credentialAc
         limit: finite(trial.usageLimitWithPrecision ?? trial.usageLimit),
         window: { id: "bonus", label: "Bonus", resetsAt: expiresAt, resetLabel: "expires" },
         unit,
-        tier: plan,
         accountId,
       }))
     }
