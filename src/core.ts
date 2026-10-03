@@ -8,7 +8,7 @@
  * - First-token timeout (180s) + idle stream timeout (300s)
  * - Empty response detection with retry
  * - Account profile resolution for OAuth and API keys
- * - Ban detection (TEMPORARILY_SUSPENDED) in HTTP errors AND stream content
+ * - Ban detection (TEMPORARILY_SUSPENDED) in HTTP errors and stream error frames
  * - Live event emission with retry buffering before the first visible delta
  */
 
@@ -32,7 +32,7 @@ import type {
   Usage,
 } from "./types.ts"
 import { buildKiroPayload, resolveToolName } from "./converters.ts"
-import { AwsEventStreamParser } from "./eventstream.ts"
+import { AwsEventStreamParser, type StreamErrorEvent } from "./eventstream.ts"
 import { ThinkingTagParser } from "./thinking-parser.ts"
 import { parseBracketToolCalls } from "./bracket-tool-parser.ts"
 import { kiroBaseForRegion, kiroRegionFromProfileArn, resolveKiroProfileArn } from "./dynamic-models.ts"
@@ -50,6 +50,7 @@ const MAX_EMPTY_RETRIES = 2          // empty response retries
 const FIRST_TOKEN_TIMEOUT_MS = 180_000  // 3 minutes to get first content
 const IDLE_STREAM_TIMEOUT_MS = 300_000  // Match native kiro-cli's 5-minute operation timeout
 const CONNECTION_TIMEOUT_MS = 120_000    // 2 min for initial connection
+const MAX_CACHED_PROFILES = 32          // tokens rotate, so old entries are dead weight
 const KIRO_STREAM_GATE_POLL_MS = 500
 const KIRO_STREAM_GATE_HEARTBEAT_MS = 15_000
 const KIRO_STREAM_GATE_STALE_MS = 10 * 60_000
@@ -146,6 +147,17 @@ class RetryableError extends Error {
   constructor(message: string) { super(message) }
 }
 
+/** The error to fail a turn with when Kiro reports `event` mid-stream. */
+function streamFailure(event: StreamErrorEvent): Error {
+  if (`${event.errorType} ${event.message}`.includes("TEMPORARILY_SUSPENDED")) {
+    return new Error(`Kiro account suspended (detected in stream): ${event.message.slice(0, 200)}`)
+  }
+  const message = `Kiro stream error (${event.errorType}): ${event.message.slice(0, 300)}`
+  // Only a server-side failure is worth retrying; throttling is backpressure and a
+  // validation error fails the same way again.
+  return /unavailable|internal/i.test(event.errorType) ? new RetryableError(message) : new Error(message)
+}
+
 /** Read fresh access token from kiro-cli's SQLite database. */
 function tryReadCliToken(): string | undefined {
   try {
@@ -207,6 +219,8 @@ export function createStreamKiro(deps: CoreDependencies) {
   const apiBase = deps.apiBase
   const managementBase = deps.managementBase ?? apiBase.replace(/^(https?:\/\/)runtime\./, "$1management.")
   const profileArnCache = new Map<string, string>()
+  // Models whose reasoning stays server-side, as listed in models.json.
+  const hiddenReasoningModels = new Set(deps.hiddenReasoningModels ?? [])
   const fetchImpl = deps.fetchImpl ?? fetch
   const cwd = deps.cwd ?? (() => process.cwd())
   const now = deps.now ?? (() => Date.now())
@@ -425,6 +439,8 @@ export function createStreamKiro(deps: CoreDependencies) {
       let hiddenThinkingBlock: ThinkingContent | undefined
       let hiddenMarkerTimer: ReturnType<typeof setTimeout> | null = null
       let hiddenMarkerEmitted = false
+      // Index of a breadcrumb this attempt closed or took over, until those events flush.
+      let releasedBreadcrumbIndex: number | null = null
 
       // --- Helper: buffer a text_end event ---
       const endTextBlock = () => {
@@ -484,7 +500,18 @@ export function createStreamKiro(deps: CoreDependencies) {
           case "reasoning": {
             // Kiro 5.x models stream reasoning on a dedicated channel
             // (reasoningContentEvent) instead of <thinking> tags in content.
-            if (!thinkingEnabled || reasoningHidden) break
+            if (!thinkingEnabled) break
+            if (!reasoningBlock && hiddenThinkingIndex !== null && hiddenThinkingBlock) {
+              // The reasoning is readable after all, so it takes over the breadcrumb,
+              // replacing any "hidden" placeholder already shown in it.
+              cancelHiddenMarkerTimer()
+              hiddenThinkingBlock.thinking = ""
+              delete hiddenThinkingBlock.redacted
+              reasoningBlock = hiddenThinkingBlock
+              currentReasoningIdx = hiddenThinkingIndex
+              releasedBreadcrumbIndex = hiddenThinkingIndex
+              hiddenThinkingIndex = null
+            }
             if (!reasoningBlock) {
               reasoningBlock = { type: "thinking", thinking: "" }
               output.content.push(reasoningBlock)
@@ -497,6 +524,10 @@ export function createStreamKiro(deps: CoreDependencies) {
             eventBuffer.push({ type: "thinking_delta", contentIndex: currentReasoningIdx, delta, partial: output })
             break
           }
+
+          case "reasoning_redacted":
+            // Kiro withholds this reasoning; its opaque blob is never shown.
+            break
 
           case "content": {
             // Close hidden reasoning breadcrumb on first real content
@@ -564,6 +595,14 @@ export function createStreamKiro(deps: CoreDependencies) {
 
       // --- Helper: reset per-attempt state and discard buffer ---
       const resetAttemptState = () => {
+        // A retry drops the events that closed or took over the breadcrumb before they
+        // reached the screen, so the screen still shows the breadcrumb there.
+        if (releasedBreadcrumbIndex !== null && hiddenThinkingBlock) {
+          hiddenThinkingBlock.thinking = hiddenMarkerEmitted ? HIDDEN_REASONING_PLACEHOLDER : ""
+          hiddenThinkingBlock.redacted = true
+          hiddenThinkingIndex = releasedBreadcrumbIndex
+          releasedBreadcrumbIndex = null
+        }
         // An open hidden-reasoning breadcrumb is already on screen; keep it at its index.
         output.content = hiddenThinkingIndex !== null && hiddenThinkingBlock ? [hiddenThinkingBlock] : []
         output.stopReason = "stop"
@@ -595,17 +634,24 @@ export function createStreamKiro(deps: CoreDependencies) {
         }
       }
 
-      const closeHiddenBreadcrumb = () => {
+      // Within an attempt the close is buffered with the events that caused it, so a
+      // retry that drops them leaves the breadcrumb open. `now` closes it on screen at once.
+      const closeHiddenBreadcrumb = (now = false) => {
         cancelHiddenMarkerTimer()
-        if (hiddenThinkingIndex !== null) {
-          stream.push({
-            type: "thinking_end",
-            contentIndex: hiddenThinkingIndex,
-            content: "",
-            partial: output,
-          })
-          hiddenThinkingIndex = null
+        if (hiddenThinkingIndex === null) return
+        const event: AssistantMessageEvent = {
+          type: "thinking_end",
+          contentIndex: hiddenThinkingIndex,
+          content: "",
+          partial: output,
         }
+        if (now) {
+          stream.push(event)
+        } else {
+          eventBuffer.push(event)
+          releasedBreadcrumbIndex = hiddenThinkingIndex
+        }
+        hiddenThinkingIndex = null
       }
 
       // --- Helper: flush buffered events to stream ---
@@ -616,6 +662,7 @@ export function createStreamKiro(deps: CoreDependencies) {
         }
         eventBuffer = []
         attemptEventsFlushed = true
+        releasedBreadcrumbIndex = null
       }
 
       try {
@@ -652,6 +699,9 @@ export function createStreamKiro(deps: CoreDependencies) {
           if (options?.signal?.aborted) throw abortError()
           if (!profileArn) throw new Error("No accessible Kiro profile found for this account.")
           profileArnCache.set(apiKey, profileArn)
+          if (profileArnCache.size > MAX_CACHED_PROFILES) {
+            profileArnCache.delete(profileArnCache.keys().next().value as string)
+          }
         }
         // The runtime rejects a profile from another region, so inference follows the profile.
         const runtimeBase = kiroBaseForRegion(apiBase, kiroRegionFromProfileArn(profileArn))
@@ -661,7 +711,7 @@ export function createStreamKiro(deps: CoreDependencies) {
         // Skip for reasoningHidden models (server-side reasoning, no tags emitted).
         const reasoningLevel = resolveReasoningLevel(model, options)
         thinkingEnabled = reasoningLevel === false || reasoningLevel === "off" ? false : !!reasoningLevel || !!model.reasoning
-        reasoningHidden = !!model.reasoningHidden
+        reasoningHidden = !!model.reasoningHidden || hiddenReasoningModels.has(model.id)
 
         let systemPromptOverride = context.systemPrompt
         if (thinkingEnabled && !reasoningHidden) {
@@ -851,15 +901,13 @@ export function createStreamKiro(deps: CoreDependencies) {
                 for (const event of events) {
                   if (controller.signal.aborted) throw abortError("Aborted")
 
-                  // Check for INSUFFICIENT_MODEL_CAPACITY in content
-                  if (event.type === "content" && event.content.includes("INSUFFICIENT_MODEL_CAPACITY")) {
-                    capacityRetryable = true
-                    continue // skip — don't buffer capacity error
-                  }
-
-                  // Check for TEMPORARILY_SUSPENDED in stream content (200 OK with ban message)
-                  if (event.type === "content" && event.content.includes("TEMPORARILY_SUSPENDED")) {
-                    throw new Error(`Kiro account suspended (detected in stream). Content: ${event.content.slice(0, 200)}`)
+                  if (event.type === "error") {
+                    // Out of capacity: Kiro sends a ThrottlingException whose reason says so.
+                    if (`${event.errorType} ${event.message}`.includes("INSUFFICIENT_MODEL_CAPACITY")) {
+                      capacityRetryable = true
+                      continue
+                    }
+                    throw streamFailure(event)
                   }
 
                   // Any decoded frame shows the stream is alive; a model can reason or
@@ -871,7 +919,8 @@ export function createStreamKiro(deps: CoreDependencies) {
                     handleEvent(event)
                   }
                 }
-                flushBuffer()
+                // Out of capacity: keep what this chunk produced off screen so the attempt can retry.
+                if (!capacityRetryable) flushBuffer()
               } catch (err) {
                 clearTimeout(readTimeoutTimer)
                 if (err instanceof DOMException && err.name === "AbortError" && !controller.signal.aborted) {
@@ -885,7 +934,11 @@ export function createStreamKiro(deps: CoreDependencies) {
               }
             }
 
-            // If capacity was insufficient, retry (outer loop)
+            // If capacity was insufficient, retry (outer loop) unless part of the
+            // answer is already on screen, where a retry would show it twice.
+            if (capacityRetryable && attemptEventsFlushed) {
+              throw new Error("Kiro ran out of model capacity mid-response (INSUFFICIENT_MODEL_CAPACITY)")
+            }
             if (capacityRetryable && outerAttempt < maxAttempts - 1) {
               try { await reader?.cancel() } catch { /* ok */ }
               try { reader?.releaseLock() } catch { /* ok */ }
@@ -903,7 +956,7 @@ export function createStreamKiro(deps: CoreDependencies) {
             // Empty response detection: got 200 but no answer text or tool call.
             // Reasoning alone is not an answer, but once it is on screen a retry
             // would show it twice, so report the turn instead.
-            const hasAnswer = output.content.some((block) => block.type !== "thinking")
+            const hasAnswer = sawAnyToolCalls || output.content.some((block) => block.type !== "thinking")
             if (!hasAnswer && !attemptEventsFlushed && outerAttempt < maxAttempts - 1) {
               try { await reader?.cancel() } catch { /* ok */ }
               try { reader?.releaseLock() } catch { /* ok */ }
@@ -1035,7 +1088,10 @@ export function createStreamKiro(deps: CoreDependencies) {
       } catch (error: unknown) {
         // Non-retryable error or exhausted retries
         cancelHiddenMarkerTimer()
-        closeHiddenBreadcrumb()
+        // Nothing will retry now, so show what this attempt held back; the failed
+        // message then matches the screen.
+        flushBuffer()
+        closeHiddenBreadcrumb(true)
         const reason: ErrorReason = controller.signal.aborted ? "aborted" : "error"
         output.stopReason = reason
         output.errorMessage =
