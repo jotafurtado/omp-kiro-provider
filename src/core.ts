@@ -580,15 +580,27 @@ export function createStreamKiro(deps: CoreDependencies) {
       try {
         let profileArn = profileArnCache.get(apiKey)
         if (!profileArn) {
+          const lookupProfile = (token: string) => resolveKiroProfileArn({
+            apiKey: token,
+            apiBase: managementBase,
+            fetchImpl,
+            profileArn: metaRaw?.profileArn,
+            env: deps.env,
+            signal: options?.signal,
+          })
           try {
-            profileArn = await resolveKiroProfileArn({
-              apiKey,
-              apiBase: managementBase,
-              fetchImpl,
-              profileArn: metaRaw?.profileArn,
-              env: deps.env,
-              signal: options?.signal,
-            })
+            try {
+              profileArn = await lookupProfile(apiKey)
+            } catch (lookupError: unknown) {
+              // A stale token fails here before inference could resync it, so resync now.
+              if (options?.signal?.aborted || !String(lookupError).includes("bearer token included in the request is invalid")) {
+                throw lookupError
+              }
+              const refreshedCliToken = resyncCliToken()
+              if (!refreshedCliToken) throw lookupError
+              apiKey = refreshedCliToken
+              profileArn = await lookupProfile(apiKey)
+            }
           } catch (resolveError: unknown) {
             if (options?.signal?.aborted) throw resolveError
             const reason = resolveError instanceof Error ? resolveError.message : String(resolveError)
@@ -706,8 +718,9 @@ export function createStreamKiro(deps: CoreDependencies) {
             } finally {
               clearTimeout(timeoutId)
             }
-            // Don't retry on ban detection.
+            // Don't retry on ban detection. A 403 can mean the cached profile is gone.
             if (response.status === 403) {
+              profileArnCache.delete(apiKey)
               const peekBody = await response.clone().text().catch(() => "")
               if (peekBody.includes("TEMPORARILY_SUSPENDED")) break
               if (!cliIdentityResynced && peekBody.includes("bearer token included in the request is invalid")) {

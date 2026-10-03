@@ -366,24 +366,26 @@ describe("cancelling while the profile is resolved", () => {
   })
 })
 
-/** Streams one "Reply OK" turn through `fetchImpl` and returns the final message. */
-async function streamOnce(fetchImpl: typeof fetch, apiKey: string): Promise<AssistantMessageLike> {
-  let finish: (message: AssistantMessageLike) => void = () => { throw new Error("Result not initialized") }
-  const result = new Promise<AssistantMessageLike>((resolve) => { finish = resolve })
-  const events: AssistantMessageEvent[] = []
+/** Returns a function that streams one "Reply OK" turn through `fetchImpl` per call. */
+function kiroTurns(fetchImpl: typeof fetch): (apiKey: string) => Promise<AssistantMessageLike> {
   const streamKiro = createStreamKiro({
     apiBase: "https://runtime.us-east-1.kiro.dev",
     fetchImpl,
-    createStream: () => ({
-      push(event) {
-        events.push(event)
-        if (event.type === "done") finish(event.message)
-        if (event.type === "error") finish(event.error)
-      },
-      end(message) { if (message) finish(message) },
-      result: () => result,
-      async *[Symbol.asyncIterator]() { yield* events },
-    }),
+    createStream: () => {
+      let finish: (message: AssistantMessageLike) => void = () => { throw new Error("Result not initialized") }
+      const result = new Promise<AssistantMessageLike>((resolve) => { finish = resolve })
+      const events: AssistantMessageEvent[] = []
+      return {
+        push(event) {
+          events.push(event)
+          if (event.type === "done") finish(event.message)
+          if (event.type === "error") finish(event.error)
+        },
+        end(message) { if (message) finish(message) },
+        result: () => result,
+        async *[Symbol.asyncIterator]() { yield* events },
+      }
+    },
     cwd: () => home,
     now: () => Date.now(),
     uuid: () => "test-conversation",
@@ -392,10 +394,15 @@ async function streamOnce(fetchImpl: typeof fetch, apiKey: string): Promise<Assi
     homeDir: home,
     calculateCost: () => {},
   })
-  return streamKiro({
+  return (apiKey) => streamKiro({
     id: "claude-opus-5-5", name: "Claude Opus 5.5", api: "kiro-custom", provider: "kiro",
     reasoning: false, input: ["text"], contextWindow: 1_000_000, maxTokens: 128_000,
   }, { messages: [{ role: "user", content: "Reply OK" }] }, { apiKey }).result()
+}
+
+/** Streams one "Reply OK" turn through `fetchImpl` and returns the final message. */
+function streamOnce(fetchImpl: typeof fetch, apiKey: string): Promise<AssistantMessageLike> {
+  return kiroTurns(fetchImpl)(apiKey)
 }
 
 describe("profile region", () => {
@@ -414,5 +421,65 @@ describe("profile region", () => {
     }) as typeof fetch, "eu-organization-token")
     assert.equal(output.stopReason, "stop", output.errorMessage)
     assert.deepEqual(inferenceHosts, ["runtime.eu-central-1.kiro.dev"])
+  })
+})
+
+describe("cached profile", () => {
+  it("is looked up again after Kiro rejects a request made with it", async () => {
+    const profileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/default"
+    let lookups = 0
+    let inferences = 0
+    const turn = kiroTurns((async (input: RequestInfo | URL) => {
+      if (new URL(String(input)).pathname === "/List-Available-Profiles") {
+        lookups += 1
+        return response({ profiles: [{ arn: profileArn }] })
+      }
+      inferences += 1
+      return inferences === 1 ? response({ message: "Profile not found" }, 403) : new Response('{"content":"OK"}')
+    }) as typeof fetch)
+    assert.equal((await turn("organization-token")).stopReason, "error")
+    assert.equal((await turn("organization-token")).stopReason, "stop")
+    assert.equal(lookups, 2)
+  })
+})
+
+describe("stale token during profile lookup", () => {
+  const hasSqlite = spawnSync("sqlite3", ["--version"]).status === 0
+
+  it("resyncs kiro-cli instead of failing the lookup", { skip: !hasSqlite }, async (t) => {
+    const cliDir = join(home, ".local", "share", "kiro-cli")
+    const bin = join(home, "bin")
+    const db = join(cliDir, "data.sqlite3")
+    const previousPath = process.env.PATH
+    mkdirSync(cliDir, { recursive: true })
+    mkdirSync(bin, { recursive: true })
+    t.after(() => {
+      process.env.PATH = previousPath
+      rmSync(cliDir, { recursive: true, force: true })
+      rmSync(bin, { recursive: true, force: true })
+    })
+    const token = (access: string, expiresAt: number) =>
+      JSON.stringify({ access_token: access, expires_at: new Date(expiresAt).toISOString() })
+    execFileSync("sqlite3", [db, "CREATE TABLE auth_kv (key TEXT, value TEXT);"
+      + ` INSERT INTO auth_kv VALUES ('kirocli:odic:token', '${token("cli-expired", Date.now() - 1000)}');`])
+    // Stands in for `kiro-cli whoami`, which renews the CLI session.
+    writeFileSync(join(bin, "renew.sql"), `UPDATE auth_kv SET value = '${token("cli-fresh", Date.now() + 3_600_000)}';`)
+    writeFileSync(join(bin, "kiro-cli"), `#!/bin/sh\nexec sqlite3 '${db}' < '${join(bin, "renew.sql")}'\n`, { mode: 0o755 })
+    process.env.PATH = `${bin}:${previousPath}`
+
+    const profileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/default"
+    const inferenceTokens: (string | null)[] = []
+    const output = await streamOnce((async (input: RequestInfo | URL, init?: RequestInit) => {
+      const authorization = new Headers(init?.headers).get("Authorization")
+      if (new URL(String(input)).pathname === "/List-Available-Profiles") {
+        return authorization === "Bearer cli-fresh"
+          ? response({ profiles: [{ arn: profileArn }] })
+          : response({ message: "The bearer token included in the request is invalid." }, 403)
+      }
+      inferenceTokens.push(authorization)
+      return new Response('{"content":"OK"}')
+    }) as typeof fetch, "stale-token")
+    assert.equal(output.stopReason, "stop", output.errorMessage)
+    assert.deepEqual(inferenceTokens, ["Bearer cli-fresh"])
   })
 })

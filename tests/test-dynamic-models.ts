@@ -501,6 +501,17 @@ describe("fetchDynamicKiroModels", () => {
     assert.deepEqual(urls, ["https://management.us-east-1.kiro.dev/"])
   })
 
+  it("reports an API key that Kiro rejects", async () => {
+    await assert.rejects(resolveKiroProfileArn({
+      apiKey: "ksk_revoked",
+      apiBase: API_BASE,
+      env: {},
+      fetchImpl: (async () => jsonResponse(403, {
+        message: "The bearer token included in the request is invalid.",
+      })) as unknown as typeof fetch,
+    }), /GetProfile returned HTTP 403: The bearer token included in the request is invalid/)
+  })
+
   it("lists models in the region that owns the profile", async () => {
     const euArn = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/EUPROFILE"
     const urls: string[] = []

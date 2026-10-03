@@ -144,7 +144,7 @@ export async function resolveKiroProfileArn(
     if (options.profileArn?.trim()) return options.profileArn.trim()
   }
   if (isApiKey) {
-    const { body: profile } = await requestManagement(
+    const { status, body: profile, message } = await requestManagement(
       options.fetchImpl ?? fetch,
       `${kiroBaseForRegion(options.apiBase, API_KEY_REGION)}/`,
       apiKey,
@@ -153,6 +153,8 @@ export async function resolveKiroProfileArn(
       { "Content-Type": "application/x-amz-json-1.0", "X-Amz-Target": "AmazonCodeWhispererService.GetProfile" },
       options.signal,
     )
+    // A rejected key is an auth failure, not an account without a profile.
+    if (status < 200 || status >= 300) throw new Error(`GetProfile returned HTTP ${status}${message ? `: ${message}` : ""}`)
     return isRecord(profile) && isRecord(profile.profile) ? nonEmptyString(profile.profile.arn) : undefined
   }
 
