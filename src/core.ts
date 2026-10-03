@@ -593,7 +593,9 @@ export function createStreamKiro(deps: CoreDependencies) {
               profileArn = await lookupProfile(apiKey)
             } catch (lookupError: unknown) {
               // A stale token fails here before inference could resync it, so resync now.
-              if (options?.signal?.aborted || !String(lookupError).includes("bearer token included in the request is invalid")) {
+              // A rejected API key fails as itself instead of switching to the CLI identity.
+              if (options?.signal?.aborted || isApiKey
+                || !String(lookupError).includes("bearer token included in the request is invalid")) {
                 throw lookupError
               }
               const refreshedCliToken = resyncCliToken()
@@ -718,12 +720,12 @@ export function createStreamKiro(deps: CoreDependencies) {
             } finally {
               clearTimeout(timeoutId)
             }
-            // Don't retry on ban detection. A 403 can mean the cached profile is gone.
+            // Don't retry on ban detection. Any other 403 can mean the cached profile is gone.
             if (response.status === 403) {
-              profileArnCache.delete(apiKey)
               const peekBody = await response.clone().text().catch(() => "")
               if (peekBody.includes("TEMPORARILY_SUSPENDED")) break
-              if (!cliIdentityResynced && peekBody.includes("bearer token included in the request is invalid")) {
+              profileArnCache.delete(apiKey)
+              if (!isApiKey && !cliIdentityResynced && peekBody.includes("bearer token included in the request is invalid")) {
                 const refreshedCliToken = resyncCliToken()
                 if (refreshedCliToken) {
                   apiKey = refreshedCliToken

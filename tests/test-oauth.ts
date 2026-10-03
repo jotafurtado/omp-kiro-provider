@@ -425,8 +425,9 @@ describe("profile region", () => {
 })
 
 describe("cached profile", () => {
-  it("is looked up again after Kiro rejects a request made with it", async () => {
-    const profileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/default"
+  const profileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/default"
+  /** Streams two turns, the first rejected with a 403 `firstBody`, and counts profile lookups. */
+  const twoTurns = async (firstBody: unknown) => {
     let lookups = 0
     let inferences = 0
     const turn = kiroTurns((async (input: RequestInfo | URL) => {
@@ -435,18 +436,29 @@ describe("cached profile", () => {
         return response({ profiles: [{ arn: profileArn }] })
       }
       inferences += 1
-      return inferences === 1 ? response({ message: "Profile not found" }, 403) : new Response('{"content":"OK"}')
+      return inferences === 1 ? response(firstBody, 403) : new Response('{"content":"OK"}')
     }) as typeof fetch)
     assert.equal((await turn("organization-token")).stopReason, "error")
     assert.equal((await turn("organization-token")).stopReason, "stop")
-    assert.equal(lookups, 2)
+    return lookups
+  }
+
+  it("is looked up again after Kiro rejects a request made with it", async () => {
+    assert.equal(await twoTurns({ message: "Profile not found" }), 2)
+  })
+
+  it("survives a suspension, which says nothing about the profile", async () => {
+    assert.equal(await twoTurns({ reason: "TEMPORARILY_SUSPENDED" }), 1)
   })
 })
 
 describe("stale token during profile lookup", () => {
   const hasSqlite = spawnSync("sqlite3", ["--version"]).status === 0
+  const profileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/default"
+  const invalidBearer = { message: "The bearer token included in the request is invalid." }
 
-  it("resyncs kiro-cli instead of failing the lookup", { skip: !hasSqlite }, async (t) => {
+  /** Installs a kiro-cli whose `whoami` renews an expired CLI token to `cli-fresh`. */
+  const installKiroCli = (t: { after: (fn: () => void) => void }) => {
     const cliDir = join(home, ".local", "share", "kiro-cli")
     const bin = join(home, "bin")
     const db = join(cliDir, "data.sqlite3")
@@ -462,24 +474,42 @@ describe("stale token during profile lookup", () => {
       JSON.stringify({ access_token: access, expires_at: new Date(expiresAt).toISOString() })
     execFileSync("sqlite3", [db, "CREATE TABLE auth_kv (key TEXT, value TEXT);"
       + ` INSERT INTO auth_kv VALUES ('kirocli:odic:token', '${token("cli-expired", Date.now() - 1000)}');`])
-    // Stands in for `kiro-cli whoami`, which renews the CLI session.
     writeFileSync(join(bin, "renew.sql"), `UPDATE auth_kv SET value = '${token("cli-fresh", Date.now() + 3_600_000)}';`)
     writeFileSync(join(bin, "kiro-cli"), `#!/bin/sh\nexec sqlite3 '${db}' < '${join(bin, "renew.sql")}'\n`, { mode: 0o755 })
     process.env.PATH = `${bin}:${previousPath}`
+  }
 
-    const profileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/default"
+  it("resyncs kiro-cli instead of failing the lookup", { skip: !hasSqlite }, async (t) => {
+    installKiroCli(t)
     const inferenceTokens: (string | null)[] = []
     const output = await streamOnce((async (input: RequestInfo | URL, init?: RequestInit) => {
       const authorization = new Headers(init?.headers).get("Authorization")
       if (new URL(String(input)).pathname === "/List-Available-Profiles") {
-        return authorization === "Bearer cli-fresh"
-          ? response({ profiles: [{ arn: profileArn }] })
-          : response({ message: "The bearer token included in the request is invalid." }, 403)
+        return authorization === "Bearer cli-fresh" ? response({ profiles: [{ arn: profileArn }] }) : response(invalidBearer, 403)
       }
       inferenceTokens.push(authorization)
       return new Response('{"content":"OK"}')
     }) as typeof fetch, "stale-token")
     assert.equal(output.stopReason, "stop", output.errorMessage)
     assert.deepEqual(inferenceTokens, ["Bearer cli-fresh"])
+  })
+
+  it("reports a rejected API key instead of switching to the CLI identity", { skip: !hasSqlite }, async (t) => {
+    installKiroCli(t)
+    for (const rejectedAt of ["GetProfile", "inference"]) {
+      const inferenceTokens: (string | null)[] = []
+      const output = await streamOnce((async (input: RequestInfo | URL, init?: RequestInit) => {
+        const headers = new Headers(init?.headers)
+        const authorization = headers.get("Authorization")
+        if (headers.get("X-Amz-Target") === "AmazonCodeWhispererService.GetProfile") {
+          return rejectedAt === "GetProfile" ? response(invalidBearer, 403) : response({ profile: { arn: profileArn } })
+        }
+        if (new URL(String(input)).pathname === "/List-Available-Profiles") return response({ profiles: [{ arn: profileArn }] })
+        inferenceTokens.push(authorization)
+        return authorization === "Bearer cli-fresh" ? new Response('{"content":"OK"}') : response(invalidBearer, 403)
+      }) as typeof fetch, `ksk_revoked_at_${rejectedAt}`)
+      assert.equal(output.stopReason, "error", rejectedAt)
+      assert.ok(!inferenceTokens.includes("Bearer cli-fresh"), rejectedAt)
+    }
   })
 })
