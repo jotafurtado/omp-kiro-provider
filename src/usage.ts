@@ -163,16 +163,17 @@ function toUsageReport(raw: UsageLimitsResponse, fetchedAt: number, credentialAc
       notes: overages && overages > 0 ? [`Overages: ${overages}`] : undefined,
       accountId,
     })]
-    // Free-trial bonus credits expire on their own date instead of resetting monthly, and an
-    // expired trial has none left to report.
+    // Free-trial bonus credits expire on their own date instead of resetting monthly. A trial
+    // without credits, or one that has expired, has none to report.
     const trial = bucket.freeTrialInfo
+    const trialLimit = finite(trial?.usageLimitWithPrecision ?? trial?.usageLimit)
     const expiresAt = toEpochMs(trial?.freeTrialExpiry)
-    if (trial && !(expiresAt !== undefined && expiresAt <= fetchedAt)) {
+    if (trial && trialLimit && !(expiresAt !== undefined && expiresAt <= fetchedAt)) {
       result.push(buildLimit({
         id: `kiro:${id}:bonus`,
         label: "Bonus credits",
         used: finite(trial.currentUsageWithPrecision ?? trial.currentUsage),
-        limit: finite(trial.usageLimitWithPrecision ?? trial.usageLimit),
+        limit: trialLimit,
         window: { id: "bonus", label: "Bonus", resetsAt: expiresAt, resetLabel: "expires" },
         unit,
         accountId,

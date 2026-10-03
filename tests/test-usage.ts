@@ -141,8 +141,8 @@ describe("Kiro usage provider", () => {
     await assert.rejects(answering(json({ usageBreakdownList: [] })).fetchUsage(params), /no credit usage/)
   })
 
-  it("gives a repeated resource type its own limit id", async () => {
-    const bucket = { resourceType: "CREDIT", currentUsage: 1, usageLimit: 50 }
+  it("gives a repeated resource type its own limit id and lists no trial without credits", async () => {
+    const bucket = { resourceType: "CREDIT", currentUsage: 1, usageLimit: 50, freeTrialInfo: {} }
     const provider = createKiroUsageProvider({
       managementBase: BASE,
       getProfileArn: () => PROFILE_ARN,
