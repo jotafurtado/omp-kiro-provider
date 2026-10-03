@@ -1,5 +1,5 @@
 /**
- * Kiro provider for OMP: registers the `kiro/*` models, Kiro login, and streaming.
+ * Kiro provider for OMP: registers the `kiro/*` models, Kiro login, streaming, and credit usage.
  * No external dependencies — pure TypeScript, Node builtins only. See README.md.
  */
 
@@ -10,6 +10,7 @@ import { fetchDynamicKiroModels } from "./src/dynamic-models.ts"
 import { loadModels } from "./src/models.ts"
 import { getApiKey, getStoredProfileArn, login, refreshToken } from "./src/oauth.ts"
 import { createAssistantMessageEventStream } from "./src/runtime.ts"
+import { createKiroUsageProvider } from "./src/usage.ts"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -62,6 +63,10 @@ export default function (pi: ExtensionAPI) {
       apiBase: MANAGEMENT_BASE,
       overlay: MODELS,
       profileArn: getStoredProfileArn(),
+    }),
+    usage: createKiroUsageProvider({
+      managementBase: MANAGEMENT_BASE,
+      getProfileArn: getStoredProfileArn,
     }),
   })
 }

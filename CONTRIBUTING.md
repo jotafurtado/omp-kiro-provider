@@ -15,7 +15,7 @@ npm test
 ## PR Guidelines
 
 - Keep PRs small and focused.
-- Include tests for converter, auth, stream, retry, or registry behavior when possible.
+- Include tests for converter, auth, stream, retry, registry, or usage behavior when possible.
 - Do not add live-network tests to the default test command.
 - Do not commit local auth material, prompt logs, or private traces.
 - Keep `models.json` changes reviewable and explain where the model metadata came from.
@@ -30,4 +30,4 @@ npm test
 
 ## Security-sensitive Changes
 
-Auth, session refresh, stream headers, and tool-call conversion should receive extra review. When in doubt, open an issue first with sanitized details.
+Auth, session refresh, request headers, and tool-call conversion should receive extra review. When in doubt, open an issue first with sanitized details.

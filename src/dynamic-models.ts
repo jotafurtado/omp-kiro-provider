@@ -1,4 +1,4 @@
-import { isKiroApiKey, kiroTokenTypeHeaders } from "./auth/token-type.ts"
+import { isKiroApiKey, kiroAuthHeaders } from "./auth/token-type.ts"
 
 export type OverlayModel = {
   id: string
@@ -33,8 +33,8 @@ export type FetchDynamicKiroModelsOptions = {
 
 export const BUILDER_ID_PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX"
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
-const DEFAULT_TIMEOUT_MS = 10_000
-const DEFAULT_MAX_BODY_BYTES = 1_048_576
+export const DEFAULT_TIMEOUT_MS = 10_000
+export const DEFAULT_MAX_BODY_BYTES = 1_048_576
 const DEFAULT_CONTEXT_WINDOW = 128_000
 const DEFAULT_MAX_TOKENS = 8192
 
@@ -98,7 +98,7 @@ export function mergeLiveWithOverlay(
     const image = item.input?.includes("image") || known?.input.includes("image") || item.id.startsWith("claude-")
     return {
       id: item.id,
-      name: item.name ?? known?.name ?? item.id,
+      name: friendlyLiveModelName(item, known?.name),
       reasoning: item.reasoning ?? known?.reasoning ?? false,
       input: image ? ["text", "image"] : ["text"],
       contextWindow: item.contextWindow ?? known?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
@@ -106,6 +106,31 @@ export function mergeLiveWithOverlay(
       cost: { ...ZERO_COST },
     }
   })
+}
+
+/**
+ * Kiro often returns its technical id as the model name (`claude-opus-5.5`). A real display
+ * name from the catalog wins, then the reviewed models.json name, then one derived from a known
+ * Claude or GPT id pattern. Anything else keeps the name or id Kiro sent.
+ */
+function friendlyLiveModelName(model: LiveModel, knownName?: string): string {
+  if (model.name && toOverlayModelId(model.name) !== model.id) return model.name
+  if (knownName) return knownName
+
+  const claude = /^claude-(opus|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?(-1m)?$/.exec(model.id)
+  if (claude) {
+    const family = claude[1][0].toUpperCase() + claude[1].slice(1)
+    const version = claude[2] + (claude[3] ? `.${claude[3]}` : "")
+    return `Claude ${family} ${version}${claude[4] ? " (1M)" : ""}`
+  }
+
+  const gpt = /^gpt-(\d+)(?:-(\d{1,2}))?(?:-([a-z]+))?$/.exec(model.id)
+  if (gpt) {
+    const version = gpt[1] + (gpt[2] ? `.${gpt[2]}` : "")
+    const variant = gpt[3] ? ` ${gpt[3][0].toUpperCase()}${gpt[3].slice(1)}` : ""
+    return `GPT-${version}${variant}`
+  }
+  return model.name ?? model.id
 }
 
 /**
@@ -244,7 +269,8 @@ function managementBases(apiBase: string): string[] {
 
 type ManagementResponse = { status: number; body: unknown; message?: string }
 
-async function requestManagement(
+/** One management API call: Kiro auth headers, a timeout, and a size-bounded JSON body. */
+export async function requestManagement(
   fetchImpl: typeof fetch,
   url: string,
   apiKey: string,
@@ -262,10 +288,9 @@ async function requestManagement(
     const response = await fetchImpl(url, {
       method: postHeaders ? "POST" : "GET",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
         Accept: "application/json",
-        ...kiroTokenTypeHeaders(apiKey),
         ...postHeaders,
+        ...kiroAuthHeaders(apiKey),
       },
       ...(postHeaders ? { body: "{}" } : {}),
       signal: controller.signal,

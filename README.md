@@ -17,10 +17,11 @@ This is an unofficial, community-maintained provider. It is not affiliated with,
 - AWS Event Stream decoding with frame checksums, routed on each frame's event type.
 - Streaming text, reasoning (`<thinking>` tags and Kiro 5.x reasoning events), and tool-call conversion. OMP's `--thinking` level, `off` through `max`, sets the thinking budget. Redacted reasoning is never shown; models that reason server-side show a "Reasoning hidden by provider" placeholder while they think.
 - Retry handling for capacity errors, empty responses, 5xx responses and server-side stream failures, only while nothing has reached the screen. Errors Kiro sends mid-stream are reported, not swallowed.
-- Runtime model discovery. With a Kiro OAuth or API credential, the account's live catalog is the model list, so new Kiro models need no change here.
+- Runtime model discovery. With a Kiro OAuth or API credential, the account's live catalog adds its models to the list, so new Kiro models need no change here.
 - `models.json` as the offline catalog and as hints for what the live catalog leaves out.
+- Kiro credit usage in OMP's `/usage` and `omp usage`.
 - Basic cost metadata set to zero because Kiro trial/subscription usage is not billed through OMP.
-- Unit tests for converters, event-stream parsing, model catalog invariants, and dynamic discovery.
+- Unit tests for converters, event-stream parsing, model catalog invariants, dynamic discovery, and usage.
 
 ## Install
 
@@ -42,7 +43,7 @@ extensions:
 Restart `omp`, then verify that Kiro models are visible:
 
 ```sh
-omp --list-models kiro
+omp models kiro
 ```
 
 To update:
@@ -105,11 +106,20 @@ omp --model kiro/auto
 omp -p --model kiro/auto "Reply briefly."
 ```
 
-Any model id from `omp --list-models kiro` can take the place of `auto`. Do not use `--provider kiro`; OMP resolves extension-defined providers through qualified `--model kiro/<model-id>` selectors.
+Any model id from `omp models kiro` can take the place of `auto`. Do not use `--provider kiro`; OMP resolves extension-defined providers through qualified `--model kiro/<model-id>` selectors.
 
 Only one Kiro response streams at a time across every `omp` session on the machine; other
 sessions and subagents wait their turn, because parallel streams on one account draw throttling.
 Set `OMP_KIRO_STREAM_GATE=0` (or `KIRO_STREAM_GATE=0`) to let them stream in parallel.
+
+### Credit usage
+
+`/usage` in interactive OMP and `omp usage` (OMP 18.4.1 or newer) show the account's Kiro credits:
+the monthly allowance with its reset date and, while a free trial lasts, its bonus credits with their
+expiry. The provider reads them from
+`GET https://management.{region}.kiro.dev/Get-Usage-Limits?origin=KIRO_CLI&profileArn=...&resourceType=CREDIT&isEmailRequired=false`,
+using the same profile and region as model discovery. If the request fails, OMP keeps showing the
+last report it received.
 
 ## Models
 
@@ -133,24 +143,30 @@ tokens are not allowed to list profiles, so the provider uses the shared Builder
 when every canonical region answers "not authorized". If a region fails instead, the request
 reports that error and the lookup is retried on the next request.
 
-The live catalog is authoritative: OMP lists exactly the models it returns. Names, token limits,
+For each model the catalog returns, its name, token limits,
 and reasoning support come from the catalog (reasoning from the `thinking` or effort fields of a
 model's request schema). `models.json` fills in what the catalog leaves out and marks models whose
 reasoning stays server-side. Every Claude model accepts images; other models do when the catalog
 or `models.json` says so. A model in neither gets text-only input and conservative token defaults.
 
-`models.json` is also OMP's static `models` catalog, used before the first discovery and whenever
-it fails. Discovery requires auth; there is no public catalog. When you are signed out or discovery
+`models.json` is also OMP's static `models` catalog, so its models are listed before the first
+discovery and when discovery fails. Discovery requires auth; there is no public catalog. When you are signed out or discovery
 fails, `fetchDynamicModels` fails rather than returning an empty list, because OMP would take an
 empty list as the account's whole catalog and drop every model discovered so far. OMP then keeps
 its cached catalog or `models.json`.
 
 The provider does not write `models.json` at runtime. There is no weekly updater.
 
-Once discovery has run, `omp --list-models kiro` shows the models your account can use; until then
-it shows the `models.json` fallback, which may include models your account lacks. New Kiro models
-appear in the discovered list, and retired ones disappear, with no change to `models.json`. Edit it only to correct metadata
-the catalog gets wrong or leaves out, in a reviewable PR, and run the test suite before merging.
+`omp models kiro` and the `/model` picker list the `models.json` models together with the
+discovered ones (OMP 18.4.2 and 18.5.0), so they can include models your account cannot use. A new
+Kiro model appears once discovery has run, with no change to `models.json`; a retired one stays
+listed only while `models.json` still has it. Edit `models.json` only to correct metadata the
+catalog gets wrong or leaves out, in a reviewable PR, and run the test suite before merging.
+
+Kiro often sends a model's id as its name. For a Claude or GPT model missing from `models.json`,
+the provider then derives a readable name from the id: `claude-opus-5.5` is shown as
+`Claude Opus 5.5`, and `gpt-5.6-sol` as `GPT-5.6 Sol`. Selectors do not change. Run
+`omp models refresh kiro` to rename models already in OMP's cached catalog.
 
 ## Development
 
@@ -169,6 +185,7 @@ omp-kiro-provider/
 ├── models.json              # committed capability overlay and fallback catalog
 ├── src/models.ts            # small filesystem loader and catalog validation
 ├── src/dynamic-models.ts    # ListAvailableModels parse, merge, and fetch
+├── src/usage.ts             # Get-Usage-Limits credit report for /usage
 ├── src/core.ts              # streaming, retries, headers, token selection
 ├── src/converters.ts        # OMP message/tool payload conversion
 ├── src/eventstream.ts       # AWS Event Stream decoder

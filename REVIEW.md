@@ -24,3 +24,9 @@ Agents that open or update PRs in this repository must keep this section current
 - 2026-08-14: Pullfrog uses the organization-level Custom OAI connection with
   `glm-5.3`. Keep its endpoint and credentials in the Pullfrog console; do
   not add a Pullfrog OpenCode config or a repo-root `opencode.json`.
+- 2026-10-03: fetch rejects a header value with CR, LF or other control
+  characters and quotes the whole value in its error, so a bad token leaks into
+  OMP's log and session. Build credential headers only with `kiroAuthHeaders`
+  (`src/auth/token-type.ts`), which throws first without the token.
+- 2026-10-03: Droid Auto Review cannot run on pull requests from forks (GitHub
+  gives them no OIDC token), so its failure there says nothing about the code.
